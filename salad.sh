@@ -159,14 +159,15 @@ api_call() {
 
   while :; do
     attempt=$((attempt + 1))
-    local tmp hdrs http_code
+    local tmp hdrs http_code ctype="application/json"
+    [ "$method" = "PATCH" ] && ctype="application/merge-patch+json"
     tmp=$(mktemp)
     hdrs=$(mktemp)
 
     http_code=$(curl -sS -X "$method" "$API_BASE$path" \
       -H "Salad-Api-Key: $SALAD_API_KEY" \
       -H "accept: application/json" \
-      -H "content-type: application/json" \
+      -H "content-type: $ctype" \
       -o "$tmp" -D "$hdrs" -w '%{http_code}' \
       ${body:+-d "$body"} 2>/dev/null) || http_code="000"
 
