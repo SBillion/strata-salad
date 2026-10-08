@@ -34,6 +34,9 @@
 #   SALAD_COUNTRY_CODES  (opt)     ex: "fr,de" ; vide = tous pays
 #   SALAD_PORT           (opt)     Port HTTP exposé, défaut 8080
 #   SALAD_NET_AUTH       (opt)     true|false (auth via clé API Salad), défaut true
+#   SALAD_STARTUP_INITIAL_DELAY / SALAD_STARTUP_PERIOD / SALAD_STARTUP_FAILURE
+#                                  (opt) fenêtre du startup probe, défauts 60/120/20
+#   SALAD_LIVENESS_PERIOD / SALAD_LIVENESS_FAILURE (opt) défauts 30/5
 #   STRATA_API_KEY       (opt)     Clé du serveur Strata (sinon générée)
 #   STRATA_FAMILY        (opt)     qwen|swift|coder|unsloth, défaut qwen
 #   STRATA_MODEL         (opt)     IQ2_XS|Q2_0|IQ3_XXS|IQ3_S, défaut IQ2_XS
@@ -80,6 +83,14 @@ PRIORITY="${SALAD_PRIORITY:-high}"
 COUNTRY_CODES="${SALAD_COUNTRY_CODES:-}"
 PORT="${SALAD_PORT:-8080}"
 NET_AUTH="${SALAD_NET_AUTH:-true}"
+
+# Probes (secondes). Startup = fenêtre large pour le 1er téléchargement du modèle.
+# bornes API : initial_delay<=1200, period<=120, failure_threshold<=20
+STARTUP_INITIAL_DELAY="${SALAD_STARTUP_INITIAL_DELAY:-60}"
+STARTUP_PERIOD="${SALAD_STARTUP_PERIOD:-120}"
+STARTUP_FAILURE="${SALAD_STARTUP_FAILURE:-20}"
+LIVENESS_PERIOD="${SALAD_LIVENESS_PERIOD:-30}"
+LIVENESS_FAILURE="${SALAD_LIVENESS_FAILURE:-5}"
 
 STRATA_FAMILY="${STRATA_FAMILY:-qwen}"
 STRATA_MODEL="${STRATA_MODEL:-IQ2_XS}"
@@ -220,9 +231,11 @@ resolve_gpu_class_id() {
 
   if [ -z "$GPU_CLASS_ID" ]; then
     info "Correspondance exacte introuvable, essai partiel..."
+    # tri par longueur de nom : "RTX 3090 (24 GB)" avant "RTX 3090 Ti (24 GB)"
     GPU_CLASS_ID=$(jq -r --arg n "$GPU_CLASS_NAME" '
       (.items // [])
       | map(select((.name // "") | ascii_downcase | contains($n | ascii_downcase)))
+      | sort_by(.name | length)
       | (.[0].id // empty)
     ' <<<"$API_LAST_RESPONSE")
   fi
@@ -291,14 +304,66 @@ build_container() {
 }
 
 build_networking() {
-  jq -cn --argjson port "$PORT" --argjson auth "$NET_AUTH" \
-    '{protocol: "http", auth: $auth, port: $port}'
+  # LLM = connexions longues/streaming : on privilégie least_number_of_connections
+  # et les timeouts max (100000 ms = 100 s) plutôt que round_robin.
+  jq -cn \
+    --argjson port "$PORT" \
+    --argjson auth "$NET_AUTH" \
+    '{
+      protocol: "http",
+      auth: $auth,
+      port: $port,
+      load_balancer: "least_number_of_connections",
+      client_request_timeout: 100000,
+      server_response_timeout: 100000
+    }'
+}
+
+# Probes HTTP sur /health du serveur Strata ($PORT). Logique :
+# - startup : large fenêtre (le 1er démarrage télécharge ~40-70 Go) ;
+# - readiness : gate le trafic tant que le modèle n'est pas prêt ;
+# - liveness : ne s'exécute qu'après le startup (sinon il tuerait le chargement).
+build_probes() {
+  jq -cn \
+    --argjson port "$PORT" \
+    --argjson s_init "$STARTUP_INITIAL_DELAY" \
+    --argjson s_period "$STARTUP_PERIOD" \
+    --argjson s_fail "$STARTUP_FAILURE" \
+    --argjson l_period "$LIVENESS_PERIOD" \
+    --argjson l_fail "$LIVENESS_FAILURE" \
+    '{
+      startup_probe: {
+        http: {headers: [], path: "/health", port: $port, scheme: "http"},
+        initial_delay_seconds: $s_init,
+        period_seconds: $s_period,
+        failure_threshold: $s_fail,
+        success_threshold: 1,
+        timeout_seconds: 10
+      },
+      readiness_probe: {
+        http: {headers: [], path: "/health", port: $port, scheme: "http"},
+        initial_delay_seconds: 10,
+        period_seconds: 10,
+        failure_threshold: 3,
+        success_threshold: 1,
+        timeout_seconds: 5
+      },
+      liveness_probe: {
+        http: {headers: [], path: "/health", port: $port, scheme: "http"},
+        initial_delay_seconds: 0,
+        period_seconds: $l_period,
+        failure_threshold: $l_fail,
+        success_threshold: 1,
+        timeout_seconds: 10
+      }
+    }'
 }
 
 build_body() {
-  local container networking codes
+  local container networking probes codes
   container=$(build_container)
   networking=$(build_networking)
+  probes=$(build_probes)
 
   if [ -n "$COUNTRY_CODES" ]; then
     codes=$(jq -cn --arg csv "$COUNTRY_CODES" \
@@ -313,6 +378,7 @@ build_body() {
     --argjson replicas "$REPLICAS" \
     --argjson container "$container" \
     --argjson networking "$networking" \
+    --argjson probes "$probes" \
     --argjson codes "$codes" \
     '{
       name: $name,
@@ -323,7 +389,14 @@ build_body() {
       container: $container,
       networking: $networking
     }
+    + $probes
     + (if $codes == null then {} else {country_codes: $codes} end)'
+}
+
+# PATCH (ContainerGroupPatch) n'accepte ni name ni autostart_policy ni
+# restart_policy : on les retire du body complet.
+build_patch_body() {
+  build_body | jq -c 'del(.name, .autostart_policy, .restart_policy)'
 }
 
 # ===========================================================================
@@ -428,7 +501,7 @@ cmd_deploy() {
 
   if group_exists "$GROUP_NAME"; then
     info "Container group \"$GROUP_NAME\" existe déjà -> PATCH"
-    body=$(build_body)
+    body=$(build_patch_body)
     if ! api_call PATCH "$path/$GROUP_NAME" "$body"; then
       err "Mise à jour échouée (${API_LAST_STATUS}) : $(api_detail)"
     fi
@@ -444,10 +517,11 @@ cmd_deploy() {
 
   info "Démarrage du container group..."
   if ! api_call POST "$path/$GROUP_NAME/start"; then
-    if [ "${API_LAST_STATUS}" != "409" ]; then
-      err "Démarrage échoué (${API_LAST_STATUS}) : $(api_detail)"
-    fi
-    info "Déjà démarré (409)"
+    case "${API_LAST_STATUS}" in
+      409) info "Déjà démarré (409)" ;;
+      400) info "Start ignoré (autostart en cours / Pending) : $(api_detail)" ;;
+      *)   err "Démarrage échoué (${API_LAST_STATUS}) : $(api_detail)" ;;
+    esac
   fi
 
   cmd_status "$GROUP_NAME"
@@ -463,7 +537,7 @@ cmd_update() {
 
   info "PATCH $name"
   local body
-  body=$(build_body)
+  body=$(build_patch_body)
   if ! api_call PATCH "$path" "$body"; then
     err "Mise à jour échouée (${API_LAST_STATUS}) : $(api_detail)"
   fi
