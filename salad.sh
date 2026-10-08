@@ -607,10 +607,12 @@ cmd_logs() {
   require_org_project
   local name
   name=$(get_group_name "${1:-}")
-  local path="/organizations/$ORG/projects/$PROJECT/containers/$name/logs"
+  local path="/organizations/$ORG/projects/$PROJECT/containers/$name/system-logs"
   api_call GET "$path" || err "Logs indisponibles (${API_LAST_STATUS}) : $(api_detail)"
-  jq -r '(.entries // .logs // .) | if type=="array" then .[] | "[\(.timestamp // "?")] \(.message // tostring)" else tostring end' \
-    <<<"$API_LAST_RESPONSE" 2>/dev/null || echo "$API_LAST_RESPONSE"
+  jq -r '
+    (.items // .entries // .logs // [])
+    | if type=="array" then .[] | "[\(.timestamp // "?")] \(.message // tostring)" else tostring end
+  ' <<<"$API_LAST_RESPONSE" 2>/dev/null || echo "$API_LAST_RESPONSE"
 }
 
 cmd_delete() {
