@@ -36,8 +36,8 @@ on:
       vision:
         description: "Image input"
         type: choice
-        options: [no, cpu, yes]
-        default: no
+        options: ["no", "cpu", "yes"]
+        default: "no"
       cuda_arch:
         description: "CUDA arch (86 = RTX 3090)"
         type: string
