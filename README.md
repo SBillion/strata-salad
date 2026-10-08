@@ -115,6 +115,17 @@ Le code CPU de l'engine est compilé pour la machine qui build. Depuis un Mac AR
 - **`ulimit memlock` non exposable** par Salad (pas d'équivalent `--ulimit` de `docker run`) :
   `salad-container-init.sh` tente de lever la limite, sinon plus de page faults au chargement.
 - **Disque éphémère** : voir « image bakée » ci-dessus.
+- **Cold start > fenêtre des probes.** Sur l'image **non bakée**, le 1er démarrage télécharge
+  ~40–80 Go (~90–110 min à ~12 Mo/s sur un nœud commun). La fenêtre max d'un probe est **60 min** :
+  le `startup_probe` ferait alors **redémarrer** le container, et le disque éphémère perdrait le
+  téléchargement (boucle). Déployez donc sans startup ni liveness :
+  `SALAD_STARTUP_PROBE=0 SALAD_LIVENESS_PROBE=0 ./salad.sh deploy` (la `readiness_probe` seule ne
+  tue jamais). Idéalement, utilisez l'**image bakée** : plus de download, fenêtre 60 min largement
+  suffisante.
+- **Toute modification du container group recrée l'instance** : comme le disque est éphémère, un
+  `update`/PATCH en plein téléchargement repart de zéro. Configurez tout **avant** de démarrer.
+- **`networking` non modifiable après création** (sauf `port`) : `auth`, `load_balancer` et les
+  timeouts se fixent à la création, sinon il faut recréer le group.
 - La clé API du serveur Strata est générée par `salad.sh` (ou `STRATA_API_KEY`). La gateway Salad
   peut en plus exiger la clé API Salad (`SALAD_NET_AUTH=true`).
 

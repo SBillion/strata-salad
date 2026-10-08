@@ -36,6 +36,7 @@
 #   SALAD_NET_AUTH       (opt)     true|false (auth via clé API Salad), défaut true
 #   SALAD_STARTUP_INITIAL_DELAY / SALAD_STARTUP_PERIOD / SALAD_STARTUP_FAILURE
 #                                  (opt) fenêtre du startup probe, défauts 60/120/20
+#   SALAD_STARTUP_PROBE / SALAD_LIVENESS_PROBE (opt) 0 = ne pas créer ce probe
 #   SALAD_LIVENESS_PERIOD / SALAD_LIVENESS_FAILURE (opt) défauts 30/5
 #   STRATA_API_KEY       (opt)     Clé du serveur Strata (sinon générée)
 #   STRATA_FAMILY        (opt)     qwen|swift|coder|unsloth, défaut qwen
@@ -87,8 +88,13 @@ NET_AUTH="${SALAD_NET_AUTH:-true}"
 # Probes (secondes). Startup = fenêtre maximale pour le 1er téléchargement du
 # modèle (~70 Go, image non bakée). bornes API : initial_delay<=1200,
 # period<=120, failure_threshold<=20 -> fenêtre max 1200 + 20*120 = 3600s.
-# Pour une image BAKÉE (démarrage en minutes), baissez SALAD_STARTUP_INITIAL_DELAY
-# (ex: 60) : le startup gate la readiness, une initiale de 20 min la retarderait.
+# IMPORTANT : sur l'image NON bakée, le cold start (~100 min à ~12 Mo/s,
+# IQ2_XS = 2x39 Go) DÉPASSE la fenêtre max de 60 min : le startup probe fait
+# alors redémarrer le container et le disque éphémère perd le download.
+# -> mettez SALAD_STARTUP_PROBE=0 (et éventuellement SALAD_LIVENESS_PROBE=0).
+# La readiness seule ne tue jamais le container.
+STARTUP_PROBE="${SALAD_STARTUP_PROBE:-1}"
+LIVENESS_PROBE="${SALAD_LIVENESS_PROBE:-1}"
 STARTUP_INITIAL_DELAY="${SALAD_STARTUP_INITIAL_DELAY:-1200}"
 STARTUP_PERIOD="${SALAD_STARTUP_PERIOD:-120}"
 STARTUP_FAILURE="${SALAD_STARTUP_FAILURE:-20}"
@@ -330,37 +336,37 @@ build_networking() {
 build_probes() {
   jq -cn \
     --argjson port "$PORT" \
+    --argjson s_on "$STARTUP_PROBE" \
+    --argjson l_on "$LIVENESS_PROBE" \
     --argjson s_init "$STARTUP_INITIAL_DELAY" \
     --argjson s_period "$STARTUP_PERIOD" \
     --argjson s_fail "$STARTUP_FAILURE" \
     --argjson l_period "$LIVENESS_PERIOD" \
     --argjson l_fail "$LIVENESS_FAILURE" \
-    '{
-      startup_probe: {
-        http: {headers: [], path: "/health", port: $port, scheme: "http"},
-        initial_delay_seconds: $s_init,
-        period_seconds: $s_period,
-        failure_threshold: $s_fail,
-        success_threshold: 1,
-        timeout_seconds: 10
-      },
-      readiness_probe: {
+    '{ readiness_probe: {
         http: {headers: [], path: "/health", port: $port, scheme: "http"},
         initial_delay_seconds: 10,
         period_seconds: 10,
         failure_threshold: 3,
         success_threshold: 1,
         timeout_seconds: 5
-      },
-      liveness_probe: {
+      } }
+    + (if $s_on == 1 then { startup_probe: {
+        http: {headers: [], path: "/health", port: $port, scheme: "http"},
+        initial_delay_seconds: $s_init,
+        period_seconds: $s_period,
+        failure_threshold: $s_fail,
+        success_threshold: 1,
+        timeout_seconds: 10
+      } } else {} end)
+    + (if $l_on == 1 then { liveness_probe: {
         http: {headers: [], path: "/health", port: $port, scheme: "http"},
         initial_delay_seconds: 0,
         period_seconds: $l_period,
         failure_threshold: $l_fail,
         success_threshold: 1,
         timeout_seconds: 10
-      }
-    }'
+      } } else {} end)'
 }
 
 build_body() {
