@@ -1,0 +1,56 @@
+# syntax=docker/dockerfile:1
+#
+# Strata "baked" image — engine image + model already downloaded and prepared
+# inside the image. On SaladCloud the container disk is ephemeral, so without
+# this the ~40-70 GB model is re-downloaded on every new instance. Baking it in
+# makes the first start only load the model and serve.
+#
+# Build the base engine image first with upstream's own Dockerfile (which
+# compiles the engine), then this one:
+#
+#   docker build -t strata-base \
+#     --build-arg CUDA_ARCHITECTURES=86 \
+#     -f <strata-src>/Dockerfile <strata-src>
+#
+#   docker build -t strata-baked \
+#     --build-arg BASE_IMAGE=strata-base \
+#     --build-arg STRATA_MODEL=IQ2_XS \
+#     --build-arg STRATA_CONTEXT=32768 \
+#     -f Dockerfile.baked .
+#
+# salad.sh does both steps for you (`SALAD_BAKE=1 salad.sh build`).
+#
+# WARNING: the model ends up in a single image layer of tens of GB. Registries
+# with a per-layer limit (Docker Hub, GHCR ~10 GB) may reject the push. Use a
+# registry that allows large layers (AWS ECR, Azure ACR, Artifact Registry) or
+# pick a small model (e.g. Q2_0). See README.
+
+ARG BASE_IMAGE=strata-base
+FROM ${BASE_IMAGE}
+
+ARG STRATA_FAMILY=qwen
+ARG STRATA_MODEL=IQ2_XS
+ARG STRATA_CONTEXT=32768
+ARG STRATA_VISION=no
+ARG STRATA_LOW_RAM=on
+ARG STRATA_KV=""
+
+# Bake into a dedicated dir (not /data, which the base image declares as a
+# volume) and point Strata at it. Runtime writes (config link, logs) land in the
+# container's ephemeral layer and do not touch the model files.
+ENV STRATA_DATA=/opt/strata-data
+
+# setup.py --setup --yes: downloads the model (resumable), prepares the expert
+# pack and the MTP draft layer, and writes the config under
+# $STRATA_DATA/config/. --no-start so the build does not launch the server.
+RUN mkdir -p "$STRATA_DATA" && \
+    .venv/bin/python setup.py --setup --yes \
+        --family "$STRATA_FAMILY" \
+        --model "$STRATA_MODEL" \
+        --context "$STRATA_CONTEXT" \
+        --vision "$STRATA_VISION" \
+        --low-ram "$STRATA_LOW_RAM" \
+        ${STRATA_KV:+--kv "$STRATA_KV"} \
+        --data-dir "$STRATA_DATA" \
+        --no-start && \
+    du -sh "$STRATA_DATA"

@@ -1,0 +1,5 @@
+.strata/
+.env
+*.log
+.salad-strata-group
+.DS_Store
