@@ -52,6 +52,30 @@ SALAD_BAKE=1 STRATA_MODEL=IQ2_XS ./salad.sh build
 ./salad.sh deploy
 ```
 
+## Mode runtime (aucun registry à alimenter)
+
+Alternative : ne rien builder/pousser, et laisser le container installer Strata **au démarrage**
+depuis une image publique générique (`nvidia/cuda:13.0.0-devel-ubuntu24.04`) :
+
+```sh
+export SALAD_IMAGE=nvidia/cuda:13.0.0-devel-ubuntu24.04   # image publique, pas de push
+SALAD_RUNTIME_BUILD=1 ./salad.sh deploy
+```
+
+`salad-runtime-init.sh` fait alors dans le container : `apt` deps → `git clone` Strata → venv +
+pip → `setup.py --setup --yes` (engine pré-compilé pour RTX 30/40/50, sinon compilation) →
+téléchargement du modèle → serveur.
+
+| | `SALAD_BAKE=1` (bakée) | `SALAD_RUNTIME_BUILD=1` | image CI (non bakée) |
+| --- | --- | --- | --- |
+| Build x86_64 requis | oui | non | oui |
+| Registry à alimenter | oui (gros) | non | oui (petit) |
+| Modèle au 1er démarrage | déjà dedans | re-téléchargé | re-téléchargé |
+| Coût par nouvelle instance | faible (pull image) | élevé (apt+pip+engine+70 Go) | élevé (70 Go) |
+
+> Le disque Salad est **éphémère** : en mode runtime, tout est refait à chaque nouvelle instance.
+> À réserver au test.
+
 ## Modèle et ressources (défauts RTX 3090)
 
 | Réglage | Défaut | Note |

@@ -47,6 +47,10 @@
 #   SALAD_BUILD_VISION   (opt)     1|0, défaut 1
 #   SALAD_ALLOW_QEMU     (opt)     1 pour autoriser un build amd64 sous QEMU (Mac)
 #   SALAD_BAKE           (opt)     1 = télécharger le modèle AU BUILD (image bakée)
+#   SALAD_RUNTIME_BUILD  (opt)     1 = installer/builder Strata AU DÉMARRAGE du
+#                                  container (image générique, aucun registry)
+#   SALAD_RUNTIME_IMAGE  (opt)     Image de base pour le runtime build
+#                                  (défaut nvidia/cuda:13.0.0-devel-ubuntu24.04)
 #   SALAD_DATA_DIR       (opt)     Chemin data Strata dans le container (vide = auto)
 # ---------------------------------------------------------------------------
 
@@ -97,11 +101,22 @@ BUILD_VISION="${SALAD_BUILD_VISION:-1}"
 BAKE="${SALAD_BAKE:-0}"
 BAKED_DOCKERFILE="$REPO_DIR/Dockerfile.baked"
 
+# Installation + build de Strata AU DÉMARRAGE du container, depuis une image
+# générique (aucun registry à alimenter). 1 = activé.
+# Coût : tout est refait à chaque instance (disque Salad éphémère).
+RUNTIME_BUILD="${SALAD_RUNTIME_BUILD:-0}"
+
 # Chemin des données Strata DANS le container. Vide = on laisse l'image décider
 # (/data pour l'image standard, /opt/strata-data pour l'image bakée).
 DATA_DIR="${SALAD_DATA_DIR:-}"
 
-INIT_SCRIPT="$REPO_DIR/salad-container-init.sh"
+if [ "$RUNTIME_BUILD" = "1" ]; then
+  INIT_SCRIPT="$REPO_DIR/salad-runtime-init.sh"
+  [ -n "$IMAGE" ] || IMAGE="${SALAD_RUNTIME_IMAGE:-nvidia/cuda:13.0.0-devel-ubuntu24.04}"
+  [ -n "$DATA_DIR" ] || DATA_DIR="/data"
+else
+  INIT_SCRIPT="$REPO_DIR/salad-container-init.sh"
+fi
 LAST_GROUP_FILE="${SALAD_LAST_GROUP_FILE:-$HOME/.salad-strata-group}"
 
 # ===========================================================================
@@ -560,6 +575,10 @@ Commandes:
 Env requises : SALAD_API_KEY, SALAD_ORG, SALAD_PROJECT, SALAD_IMAGE
 Modèle       : STRATA_MODEL=${STRATA_MODEL}  STRATA_CONTEXT=${STRATA_CONTEXT}  STRATA_FAMILY=${STRATA_FAMILY}
 GPU          : SALAD_GPU_CLASS="${SALAD_GPU_CLASS}"  SALAD_CPU=${CPU}  SALAD_MEMORY_MB=${MEMORY_MB}
+
+Modes:
+  SALAD_BAKE=1          modèle baké dans l'image (build)
+  SALAD_RUNTIME_BUILD=1 installer/builder Strata au démarrage (image générique, sans registry)
 EOF
 }
 
