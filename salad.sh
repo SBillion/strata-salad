@@ -84,9 +84,12 @@ COUNTRY_CODES="${SALAD_COUNTRY_CODES:-}"
 PORT="${SALAD_PORT:-8080}"
 NET_AUTH="${SALAD_NET_AUTH:-true}"
 
-# Probes (secondes). Startup = fenêtre large pour le 1er téléchargement du modèle.
-# bornes API : initial_delay<=1200, period<=120, failure_threshold<=20
-STARTUP_INITIAL_DELAY="${SALAD_STARTUP_INITIAL_DELAY:-60}"
+# Probes (secondes). Startup = fenêtre maximale pour le 1er téléchargement du
+# modèle (~70 Go, image non bakée). bornes API : initial_delay<=1200,
+# period<=120, failure_threshold<=20 -> fenêtre max 1200 + 20*120 = 3600s.
+# Pour une image BAKÉE (démarrage en minutes), baissez SALAD_STARTUP_INITIAL_DELAY
+# (ex: 60) : le startup gate la readiness, une initiale de 20 min la retarderait.
+STARTUP_INITIAL_DELAY="${SALAD_STARTUP_INITIAL_DELAY:-1200}"
 STARTUP_PERIOD="${SALAD_STARTUP_PERIOD:-120}"
 STARTUP_FAILURE="${SALAD_STARTUP_FAILURE:-20}"
 LIVENESS_PERIOD="${SALAD_LIVENESS_PERIOD:-30}"
