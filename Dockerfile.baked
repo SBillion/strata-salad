@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
 #
-# Strata "baked" image — engine image + model already downloaded and prepared
-# inside the image. On SaladCloud the container disk is ephemeral, so without
-# this the ~40-70 GB model is re-downloaded on every new instance. Baking it in
-# makes the first start only load the model and serve.
+# Strata "baked" image — engine image + model already downloaded AND prepared
+# (pack + MTP) inside the image. On SaladCloud the container disk is ephemeral,
+# so without this the ~68 GB model is re-downloaded and re-packed on every new
+# instance. Baking it in makes the first start only load the model and serve.
 #
 # Build the base engine image first with upstream's own Dockerfile (which
 # compiles the engine), then this one:
@@ -20,13 +20,24 @@
 #
 # salad.sh does both steps for you (`SALAD_BAKE=1 salad.sh build`).
 #
+# Build args:
+#   STRATA_KEEP_GGUF=1  (default) keep the raw model files -> biggest image.
+#   STRATA_KEEP_GGUF=0  drop them: with LOW_RAM=on the engine reads the experts
+#                       from the prepared pack, so the raw GGUF (most of the
+#                       image) can be removed. Saves ~68 GB. EXPERIMENTAL:
+#                       verify the server starts before relying on it.
+#
 # WARNING: the model ends up in a single image layer of tens of GB. Registries
 # with a per-layer limit (Docker Hub, GHCR ~10 GB) may reject the push. Use a
-# registry that allows large layers (AWS ECR, Azure ACR, Artifact Registry) or
-# pick a small model (e.g. Q2_0). See README.
+# registry that allows large layers (self-hosted registry:2, AWS ECR, Azure
+# ACR, Artifact Registry) or pick a small model. See README.
 
 ARG BASE_IMAGE=strata-base
-FROM ${BASE_IMAGE}
+
+# ---------------------------------------------------------------------------
+# Stage 1: download + prepare the model (setup.py --setup --no-start)
+# ---------------------------------------------------------------------------
+FROM ${BASE_IMAGE} AS prep
 
 ARG STRATA_FAMILY=qwen
 ARG STRATA_MODEL=IQ2_XS
@@ -36,13 +47,9 @@ ARG STRATA_LOW_RAM=on
 ARG STRATA_KV=""
 
 # Bake into a dedicated dir (not /data, which the base image declares as a
-# volume) and point Strata at it. Runtime writes (config link, logs) land in the
-# container's ephemeral layer and do not touch the model files.
+# volume) and point Strata at it.
 ENV STRATA_DATA=/opt/strata-data
 
-# setup.py --setup --yes: downloads the model (resumable), prepares the expert
-# pack and the MTP draft layer, and writes the config under
-# $STRATA_DATA/config/. --no-start so the build does not launch the server.
 RUN mkdir -p "$STRATA_DATA" && \
     .venv/bin/python setup.py --setup --yes \
         --family "$STRATA_FAMILY" \
@@ -52,5 +59,38 @@ RUN mkdir -p "$STRATA_DATA" && \
         --low-ram "$STRATA_LOW_RAM" \
         ${STRATA_KV:+--kv "$STRATA_KV"} \
         --data-dir "$STRATA_DATA" \
-        --no-start && \
+        --no-start
+
+# ---------------------------------------------------------------------------
+# Stage 2: optionally drop the raw GGUF. Removing files in a *separate* stage
+# (then COPYing the result) really shrinks the final image, unlike `rm` in the
+# same RUN as the download.
+# ---------------------------------------------------------------------------
+FROM prep AS trimmed
+
+ARG STRATA_LOW_RAM=on
+ARG STRATA_KEEP_GGUF=1
+
+RUN if [ "$STRATA_KEEP_GGUF" != "1" ]; then \
+      if [ "$STRATA_LOW_RAM" != "on" ]; then \
+        echo "WARNING: STRATA_KEEP_GGUF=0 with LOW_RAM!='on': the engine may need the raw GGUF"; \
+      fi; \
+      echo "dropping raw model files under $STRATA_DATA/models (experts come from the pack)"; \
+      rm -rf "$STRATA_DATA/models"; \
+    fi && \
     du -sh "$STRATA_DATA"
+
+# ---------------------------------------------------------------------------
+# Stage 3: final image = base engine + prepared data + socat (IPv6 relay)
+# ---------------------------------------------------------------------------
+FROM ${BASE_IMAGE}
+
+ENV STRATA_DATA=/opt/strata-data
+
+# socat: SaladCloud's gateway/probes speak IPv6; Strata listens on IPv4 only.
+# Baking it in avoids an apt-get at every container start.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends socat && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=trimmed /opt/strata-data /opt/strata-data

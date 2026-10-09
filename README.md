@@ -23,6 +23,34 @@ démarrage ne fait que charger le modèle et servir.
 > limite par couche (Docker Hub, GHCR ≈ 10 Go) peuvent refuser le push. Utilisez un registry qui
 > accepte les grosses couches (AWS ECR, Azure ACR, Artifact Registry) ou un petit modèle (Q2_0).
 
+### Où builder / où pousser (baked)
+
+Deux contraintes :
+
+1. **Builder sur x86_64** (l'engine compile du code CPU natif) avec **~250 Go de disque libre**
+   (modèle ~68 Go + pack ~36 Go + MTP + couches Docker). Options : VM cloud x86_64 CPU-only,
+   runner GitHub self-hosted / larger-runner (le runner hébergé standard n'a pas le disque et le
+   build+push peut dépasser les 6 h), ou ta machine x86_64.
+2. **Pousser vers un registry sans limite de couche** (self-hosted `registry:2`, AWS ECR, Azure
+   ACR, Artifact Registry) : la donnée du modèle est une couche unique de plusieurs dizaines de Go.
+
+```sh
+# machine x86_64, ~250 Go libres
+export SALAD_IMAGE=registry.example.com/strata:IQ2_XS-baked
+SALAD_BAKE=1 STRATA_MODEL=IQ2_XS ./salad.sh build   # base engine (arch 86) puis Dockerfile.baked
+./salad.sh push
+
+# image plus légère : jeter les GGUF bruts (LOW_RAM=on lit le pack) — expérimental
+SALAD_BAKE=1 SALAD_KEEP_GGUF=0 STRATA_MODEL=IQ2_XS ./salad.sh build
+
+# déploiement (données déjà dans l'image -> aucun download)
+SALAD_IMAGE=registry.example.com/strata:IQ2_XS-baked ./salad.sh deploy
+```
+
+`image_caching: true` (déjà dans le body) garde les couches en cache sur un nœud : les instances
+suivantes **sur ce nœud** démarrent sans re-pull ; une réalocation sur un **nouveau** nœud re-pull
+l'image entière.
+
 ## Prérequis
 
 - `bash`, `curl`, `jq`, `docker`.
@@ -84,15 +112,28 @@ téléchargement du modèle → serveur.
 | `STRATA_MODEL` | `IQ2_XS` | `IQ2_XS` \| `Q2_0` \| `IQ3_XXS` \| `IQ3_S` |
 | `STRATA_CONTEXT` | `32768` | |
 | `STRATA_VISION` | `no` | `no` \| `cpu` \| `yes` |
-| `STRATA_LOW_RAM` | `on` | Salad plafonne la RAM à 60 Go |
-| `SALAD_CPU` | `8` | vCPU |
-| `SALAD_MEMORY_MB` | `61440` | 60 Go (max Salad) |
+| `STRATA_LOW_RAM` | `on` | voir « Pourquoi LOW_RAM=on » ci-dessous |
+| `SALAD_CPU` | `8` | vCPU ; **max 16** côté API |
+| `SALAD_MEMORY_MB` | `61440` | 60 Go ; **max ~61440 Mo** côté API |
 | `SALAD_STORAGE_GB` | `120` | disque éphémère |
 | `SALAD_PRIORITY` | `high` | `high` \| `medium` \| `low` \| `batch` |
 | `SALAD_NET_AUTH` | `true` | auth par clé API Salad sur la gateway |
 
 Un 3090 (24 Go de VRAM) tient Q2_0 et IQ2_XS ; les tailles IQ3 demandent plus de RAM/VRAM.
 Toutes les variables sont listées en tête de `salad.sh`.
+
+### Pourquoi LOW_RAM=on ?
+
+`setup.py` lit la RAM disponible dans **`/proc/meminfo`, soit la RAM du nœud entier**, pas la limite
+du container (Salad plafonne l'instance à ~60 Go). Sans `LOW_RAM`, setup croit disposer de 64-128 Go
+et prévoit de charger 39-48 Go d'experts **en RAM** (+ verrouillage pour le GPU) : sous le plafond du
+container, ça part en OOM/thrash. `LOW_RAM=on` fait lire les experts depuis le **pack sur disque**
+(`experts.bin`) au lieu de tout garder résident → empreinte RAM faible, tient dans le plafond.
+
+Conséquence : le décodage est un peu plus lent (lectures disque), mais avec 24 Go de VRAM le cache
+d'experts GPU absorbe le plus chaud. **Plus de vCPU (jusqu'à 16) accélère la part CPU** du chemin
+low-RAM. Si ton organisation permettait >60 Go de RAM, on pourrait passer `LOW_RAM=off` (experts
+résidents → plus rapide) ; au plafond documenté de 60 Go, garde `on`.
 
 ## CI (GitHub Actions)
 

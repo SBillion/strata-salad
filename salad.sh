@@ -51,6 +51,8 @@
 #   SALAD_BUILD_VISION   (opt)     1|0, défaut 1
 #   SALAD_ALLOW_QEMU     (opt)     1 pour autoriser un build amd64 sous QEMU (Mac)
 #   SALAD_BAKE           (opt)     1 = télécharger le modèle AU BUILD (image bakée)
+#   SALAD_KEEP_GGUF      (opt)     1 (défaut) | 0 = supprimer les GGUF bruts de
+#                                  l'image bakée (~-68 Go ; LOW_RAM=on requis)
 #   SALAD_RUNTIME_BUILD  (opt)     1 = installer/builder Strata AU DÉMARRAGE du
 #                                  container (image générique, aucun registry)
 #   SALAD_RUNTIME_IMAGE  (opt)     Image de base pour le runtime build
@@ -120,6 +122,9 @@ BUILD_VISION="${SALAD_BUILD_VISION:-1}"
 # nouvelle instance Salad. 1 = activé, 0 = download au démarrage (défaut).
 BAKE="${SALAD_BAKE:-0}"
 BAKED_DOCKERFILE="$REPO_DIR/Dockerfile.baked"
+# Image bakée : garder les GGUF bruts (1) ou les supprimer (0, ~-68 Go) quand
+# LOW_RAM=on lit les experts depuis le pack (expérimental).
+KEEP_GGUF="${SALAD_KEEP_GGUF:-1}"
 
 # Installation + build de Strata AU DÉMARRAGE du container, depuis une image
 # générique (aucun registry à alimenter). 1 = activé.
@@ -457,6 +462,7 @@ cmd_build() {
       --build-arg "STRATA_VISION=$STRATA_VISION" \
       --build-arg "STRATA_LOW_RAM=$STRATA_LOW_RAM" \
       --build-arg "STRATA_KV=$STRATA_KV" \
+      --build-arg "STRATA_KEEP_GGUF=$KEEP_GGUF" \
       -f "$BAKED_DOCKERFILE" "$REPO_DIR"
   else
     info "2/2 mode sans bake : le modèle sera téléchargé au démarrage du container"

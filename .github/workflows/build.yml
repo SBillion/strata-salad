@@ -15,6 +15,10 @@ on:
         description: "Bake the model into the image (needs a large-disk runner)"
         type: boolean
         default: false
+      keep_gguf:
+        description: "Keep raw GGUF in the baked image (false = smaller, needs LOW_RAM=on)"
+        type: boolean
+        default: true
       runner:
         description: "Runner label (use a self-hosted/larger runner for bake)"
         type: string
@@ -120,6 +124,7 @@ jobs:
             --build-arg "STRATA_CONTEXT=${{ inputs.context || '32768' }}" \
             --build-arg "STRATA_VISION=${{ inputs.vision || 'no' }}" \
             --build-arg "STRATA_LOW_RAM=on" \
+            --build-arg "STRATA_KEEP_GGUF=${{ inputs.keep_gguf == false && '0' || '1' }}" \
             -f Dockerfile.baked .
 
       - name: Tag non-baked image
