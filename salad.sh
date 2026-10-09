@@ -659,7 +659,7 @@ cmd_deploy() {
       if [ -n "$STRATA_ALLOWED_HOSTS" ]; then
         body=$(build_patch_body)
         if ! api_call PATCH "$path/$GROUP_NAME" "$body"; then
-          err "PATCH allowed_hosts échoué (${API_LAST_STATUS}) : $(api_detail)"
+          info "PATCH allowed_hosts ignoré (${API_LAST_STATUS}) : $(api_detail) — sans conséquence si STRATA_API_KEY est posé"
         fi
       fi
     fi
