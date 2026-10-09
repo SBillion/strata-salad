@@ -27,6 +27,11 @@ démarrage ne fait que charger le modèle et servir.
 
 Deux contraintes :
 
+0. **Un GPU NVIDIA doit être visible au build.** `setup.py --setup` fait un check matériel au step 1
+   (`nvidia-smi`) et refuse sans GPU. Conséquence : le bake ne peut **pas** se faire sur un runner
+   GitHub hébergé (ni large — indisponible pour un repo perso). Il faut un builder **avec GPU** :
+   container Salad RTX 3090 (le GPU est visible → `setup.py` passe), VM GPU cloud avec Docker, ou ta
+   machine avec un driver NVIDIA.
 1. **Builder sur x86_64** (l'engine compile du code CPU natif) avec **~250 Go de disque libre**
    (modèle ~68 Go + pack ~36 Go + MTP + couches Docker). Options : VM cloud x86_64 CPU-only,
    runner GitHub self-hosted / larger-runner (le runner hébergé standard n'a pas le disque et le

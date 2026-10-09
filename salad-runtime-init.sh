@@ -31,6 +31,19 @@ export HOST="${HOST:-0.0.0.0}"
 export PORT="${PORT:-8080}"
 export STRATA_EXECV="${STRATA_EXECV:-1}"
 
+# --- DNS rebinding : autorise le nom de la gateway Salad --------------------
+# La gateway relaie avec Host=<group>.<...>.salad.cloud ; sans clé API le
+# serveur Strata refuse ce nom (403 « DNS rebinding protection »). On autorise
+# tout *.salad.cloud.
+export STRATA_ALLOWED_HOSTS="${STRATA_ALLOWED_HOSTS:-.salad.cloud}"
+
+# --- Clé API du serveur Strata ----------------------------------------------
+# Le serveur lit STRATA_API_KEY ; API_KEY ne sert qu'à setup.py. On propage
+# (jamais vide : le serveur sortirait si STRATA_API_KEY était défini vide).
+if [ -z "${STRATA_API_KEY:-}" ] && [ -n "${API_KEY:-}" ]; then
+  export STRATA_API_KEY="$API_KEY"
+fi
+
 STRATA_HOME="${STRATA_HOME:-/opt/strata}"
 STRATA_REPO="${STRATA_REPO:-https://github.com/Niko1221/Strata.git}"
 

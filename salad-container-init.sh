@@ -32,6 +32,22 @@ export PORT="${PORT:-8080}"
 export LOW_RAM="${LOW_RAM:-on}"          # on: experts mappés depuis le pack
 export STRATA_EXECV="${STRATA_EXECV:-1}" # le serveur devient PID 1 (SIGTERM)
 
+# --- DNS rebinding : autorise le nom de la gateway Salad --------------------
+# La gateway relaie les requêtes avec Host=<group>.<...>.salad.cloud. Sans clé
+# API (cf. plus bas), le serveur Strata refuse tout nom inconnu (403 « Host ...
+# is not allowed (DNS rebinding protection) »). On autorise tout *.salad.cloud.
+export STRATA_ALLOWED_HOSTS="${STRATA_ALLOWED_HOSTS:-.salad.cloud}"
+
+# --- Clé API du serveur Strata ----------------------------------------------
+# Attention : le serveur lit STRATA_API_KEY, l'entrypoint/ setup.py lit API_KEY.
+# Une image bakée a un strata-<model>.json avec "api_key": "" (setup fait au
+# build sans clé) et l'entrypoint ne relance PAS setup au démarrage : sans
+# injection, la clé fournie par salad.sh est ignorée. On propage donc API_KEY
+# vers STRATA_API_KEY (sans jamais l'exporter vide : le serveur sortirait).
+if [ -z "${STRATA_API_KEY:-}" ] && [ -n "${API_KEY:-}" ]; then
+  export STRATA_API_KEY="$API_KEY"
+fi
+
 # ---------------------------------------------------------------------------
 # memlock : l'entrypoint Runpod/Strata utilise `--ulimit memlock=-1`. Salad
 # n'expose pas les ulimits, on tente de lever la limite ici. Si ça échoue

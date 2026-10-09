@@ -45,6 +45,9 @@
 #   STRATA_VISION        (opt)     no|yes|cpu, défaut no
 #   STRATA_LOW_RAM       (opt)     on|off|auto, défaut on
 #   STRATA_KV            (opt)     int8|q4_0|k8v4 (vide = défaut Strata)
+#   STRATA_ALLOWED_HOSTS (opt)     noms Host acceptés sans clé API (DNS
+#                                  rebinding) ; "auto" (défaut) = le hostname de
+#                                  la gateway du container group uniquement
 #   SALAD_SOURCE_DIR     (opt)     Clone Strata, défaut ./.strata
 #   SALAD_BUILD_PLATFORM (opt)     Plateforme buildx, défaut linux/amd64
 #   SALAD_CUDA_ARCH      (opt)     Arch CUDA, défaut 86 (RTX 3090)
@@ -110,6 +113,12 @@ STRATA_VISION="${STRATA_VISION:-no}"
 STRATA_LOW_RAM="${STRATA_LOW_RAM:-on}"
 STRATA_KV="${STRATA_KV:-}"
 STRATA_API_KEY="${STRATA_API_KEY:-}"
+# Noms d'hôte (Host) que le serveur Strata accepte quand il n'a pas de clé API
+# (protection DNS rebinding). "auto" (défaut) = uniquement le hostname de la
+# gateway de CE container group, résolu via l'API au déploiement. Sinon :
+# plusieurs noms séparés par des virgules ; "*" coupe le contrôle,
+# ".exemple.com" couvre le domaine et ses sous-domaines.
+STRATA_ALLOWED_HOSTS="${STRATA_ALLOWED_HOSTS:-auto}"
 
 STRATA_REPO="${SALAD_STRATA_REPO:-https://github.com/Niko1221/Strata.git}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -271,6 +280,7 @@ build_environment() {
     --arg kv "$STRATA_KV" \
     --arg port "$PORT" \
     --arg api_key "$STRATA_API_KEY" \
+    --arg allowed_hosts "$STRATA_ALLOWED_HOSTS" \
     --arg data_dir "$DATA_DIR" \
     '{
       FAMILY: $family,
@@ -282,9 +292,10 @@ build_environment() {
       PORT: $port,
       STRATA_EXECV: "1"
     }
-    + (if $data_dir != "" then {STRATA_DATA: $data_dir} else {} end)
-    + (if $kv      != "" then {KV: $kv}           else {} end)
-    + (if $api_key != "" then {API_KEY: $api_key} else {} end)'
+    + (if $data_dir      != "" then {STRATA_DATA: $data_dir}               else {} end)
+    + (if $kv            != "" then {KV: $kv}                             else {} end)
+    + (if $api_key       != "" then {API_KEY: $api_key, STRATA_API_KEY: $api_key} else {} end)
+    + (if $allowed_hosts != "" then {STRATA_ALLOWED_HOSTS: $allowed_hosts} else {} end)'
 }
 
 build_container() {
@@ -499,6 +510,36 @@ group_exists() {
   api_call GET "/organizations/$ORG/projects/$PROJECT/containers/$name" 2>/dev/null
 }
 
+group_hostname() {
+  jq -r '.networking.hostname // empty' <<<"$API_LAST_RESPONSE" 2>/dev/null
+}
+
+# Si STRATA_ALLOWED_HOSTS="auto", on ne laisse passer que le hostname de la
+# gateway de CE container group (connu via l'API), pas tout *.salad.cloud.
+# $1 = nom du group, $2 = 1 si le group vient d'être créé (sinon 0).
+resolve_allowed_host() {
+  local name="$1" created="${2:-0}" host
+  if [ "$created" = "1" ]; then
+    host=$(group_hostname)
+    if [ -z "$host" ]; then
+      api_call GET "/organizations/$ORG/projects/$PROJECT/containers/$name" >/dev/null 2>&1 || true
+      host=$(group_hostname)
+    fi
+  else
+    api_call GET "/organizations/$ORG/projects/$PROJECT/containers/$name" >/dev/null 2>&1 || true
+    host=$(group_hostname)
+  fi
+  if [ -n "$host" ]; then
+    STRATA_ALLOWED_HOSTS="$host"
+    info "allowed_hosts = $host (gateway du container group)"
+    return 0
+  fi
+  STRATA_ALLOWED_HOSTS=""
+  info "allowed_hosts : hostname introuvable ; contrôle DNS rebinding laissé au"
+  info "  défaut de l'init (.salad.cloud). La clé API Strata le désactive de toute façon."
+  return 1
+}
+
 cmd_deploy() {
   require_org_project
   [ -n "$IMAGE" ] || err "SALAD_IMAGE est requis (ex: docker.io/monuser/strata:3090)"
@@ -513,19 +554,37 @@ cmd_deploy() {
   resolve_gpu_class_id
 
   local path="/organizations/$ORG/projects/$PROJECT/containers"
-  local body pod_status
+  local body auto_host=0
+  [ "$STRATA_ALLOWED_HOSTS" = "auto" ] && auto_host=1
 
   if group_exists "$GROUP_NAME"; then
     info "Container group \"$GROUP_NAME\" existe déjà -> PATCH"
+    [ "$auto_host" = "1" ] && resolve_allowed_host "$GROUP_NAME" 0
     body=$(build_patch_body)
     if ! api_call PATCH "$path/$GROUP_NAME" "$body"; then
       err "Mise à jour échouée (${API_LAST_STATUS}) : $(api_detail)"
     fi
   else
     info "Création du container group \"$GROUP_NAME\""
-    body=$(build_body)
+    if [ "$auto_host" = "1" ]; then
+      # Création sans démarrage : on pose le hostname exact d'abord, puis on
+      # démarre (le hostname n'est connu qu'après la création).
+      STRATA_ALLOWED_HOSTS=""
+      body=$(build_body | jq -c '.autostart_policy=false')
+    else
+      body=$(build_body)
+    fi
     if ! api_call POST "$path" "$body"; then
       err "Création échouée (${API_LAST_STATUS}) : $(api_detail)"
+    fi
+    if [ "$auto_host" = "1" ]; then
+      resolve_allowed_host "$GROUP_NAME" 1 || true
+      if [ -n "$STRATA_ALLOWED_HOSTS" ]; then
+        body=$(build_patch_body)
+        if ! api_call PATCH "$path/$GROUP_NAME" "$body"; then
+          err "PATCH allowed_hosts échoué (${API_LAST_STATUS}) : $(api_detail)"
+        fi
+      fi
     fi
   fi
 
@@ -550,6 +609,25 @@ cmd_update() {
   name=$(get_group_name "${1:-}")
   GROUP_NAME="$name"
   local path="/organizations/$ORG/projects/$PROJECT/containers/$name"
+
+  # PATCH remplace TOUT environment_variables : on relit l'existant pour ne pas
+  # effacer la clé API (si STRATA_API_KEY n'est pas fourni) et pour récupérer le
+  # hostname de la gateway (allowed_hosts=auto).
+  local existing=""
+  if api_call GET "$path"; then
+    existing="$API_LAST_RESPONSE"
+    if [ -z "$STRATA_API_KEY" ]; then
+      STRATA_API_KEY=$(jq -r '
+        (.container.environment_variables.STRATA_API_KEY //
+         .container.environment_variables.API_KEY // empty)' <<<"$existing")
+      [ -n "$STRATA_API_KEY" ] && info "Clé API Strata conservée depuis le group existant"
+    fi
+    if [ "$STRATA_ALLOWED_HOSTS" = "auto" ]; then
+      local host
+      host=$(group_hostname)
+      [ -n "$host" ] && { STRATA_ALLOWED_HOSTS="$host"; info "allowed_hosts = $host (gateway)"; }
+    fi
+  fi
 
   info "PATCH $name"
   local body
