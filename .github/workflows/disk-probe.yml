@@ -1,0 +1,33 @@
+name: disk-probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Disk before
+        run: |
+          df -h /
+          echo "--- /mnt ---"
+          df -h /mnt || true
+          echo "--- docker root ---"
+          docker info --format '{{.DockerRootDir}}' || true
+
+      - name: Free space (GitHub documented cleanup)
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"/* 2>/dev/null || true
+          docker image prune -af || true
+          sudo swapoff -a || true
+
+      - name: Disk after
+        run: |
+          echo "=== after cleanup ==="
+          df -h /
+          df -h /mnt || true
