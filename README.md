@@ -97,6 +97,29 @@ tests** : le group restait `pending` (préparation d'image côté Salad / placem
 l'expérimentation ; préférer **B″** ci-dessus. Flags utiles : `SALAD_TARGET_IMAGE`,
 `SALAD_REGISTRY_USER/PASS`, `SALAD_BAKE_CPU`, `SALAD_BAKE_STORAGE_GB`.
 
+## Commandes
+
+```sh
+./salad.sh list                 # tous les container groups (nom, état, URL)
+./salad.sh deploy [NAME]        # créer/MAJ + démarrer
+./salad.sh update [NAME]        # modifier la config (PATCH, sans démarrer)
+./salad.sh start [NAME]         # démarrer
+./salad.sh stop  [NAME]         # arrêter
+./salad.sh restart [NAME]       # stop puis start
+./salad.sh start-all            # démarrer tous les groups du projet
+./salad.sh stop-all             # arrêter tous les groups du projet
+./salad.sh status [NAME]        # état + URL + instances
+./salad.sh logs   [NAME]        # logs système
+./salad.sh recreate [NAME]      # appliquer la version courante SANS re-pull d'image
+./salad.sh delete [NAME]        # supprimer (irréversible, force un re-pull ensuite)
+```
+
+- `update` (PATCH) reprend par défaut l'image/ressources/modèle **actuels** du group : seuls les
+  champs surchargés changent (via env `SALAD_*`/`STRATA_*`).
+- **Pour appliquer un PATCH sans rebuild/re-pull** : `update` puis `recreate`. L'endpoint Salad
+  `recreate` détruit et relance le container **sur le même nœud**, image en cache → pas de
+  re-téléchargement. Éviter `delete` (lui force un re-pull).
+
 ## Prérequis
 
 - `bash`, `curl`, `jq`, `docker`.
