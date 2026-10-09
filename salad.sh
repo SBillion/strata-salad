@@ -496,7 +496,7 @@ build_bake_body() {
       name: $name,
       display_name: "Strata bake B-prime",
       replicas: 1,
-      autostart_policy: false,
+      autostart_policy: true,
       restart_policy: "on_failure",
       networking: {protocol: "http", auth: false, port: 8080},
       container: {
@@ -752,14 +752,6 @@ cmd_bake() {
     api_call POST "$path" "$body" || err "Création échouée (${API_LAST_STATUS}) : $(api_detail)"
   fi
   save_last_group "$BAKE_GROUP"
-
-  info "Démarrage du bake..."
-  if ! api_call POST "$path/$BAKE_GROUP/start"; then
-    case "${API_LAST_STATUS}" in
-      400|409) info "Start ignoré (${API_LAST_STATUS}) : $(api_detail)" ;;
-      *) err "Démarrage échoué (${API_LAST_STATUS}) : $(api_detail)" ;;
-    esac
-  fi
 
   echo ""
   info "Suivi :  ./salad.sh logs $BAKE_GROUP"
