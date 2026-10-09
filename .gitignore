@@ -3,3 +3,4 @@
 *.log
 .salad-strata-group
 .DS_Store
+node_modules/
