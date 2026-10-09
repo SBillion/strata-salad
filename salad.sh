@@ -56,6 +56,10 @@
 #   SALAD_BAKE           (opt)     1 = télécharger le modèle AU BUILD (image bakée)
 #   SALAD_KEEP_GGUF      (opt)     1 (défaut) | 0 = supprimer les GGUF bruts de
 #                                  l'image bakée (~-68 Go ; LOW_RAM=on requis)
+#   B' (bake) : SALAD_TARGET_IMAGE (image à produire, sinon <base>:<MODEL>-baked),
+#               SALAD_REGISTRY_HOST (ghcr.io), SALAD_REGISTRY_USER, SALAD_REGISTRY_PASS,
+#               SALAD_BAKE_GROUP (strata-bake), SALAD_BAKE_CPU (16),
+#               SALAD_BAKE_MEMORY_MB (61440), SALAD_BAKE_STORAGE_GB (250)
 #   SALAD_RUNTIME_BUILD  (opt)     1 = installer/builder Strata AU DÉMARRAGE du
 #                                  container (image générique, aucun registry)
 #   SALAD_RUNTIME_IMAGE  (opt)     Image de base pour le runtime build
@@ -135,6 +139,17 @@ BAKED_DOCKERFILE="$REPO_DIR/Dockerfile.baked"
 # LOW_RAM=on lit les experts depuis le pack (expérimental).
 KEEP_GGUF="${SALAD_KEEP_GGUF:-1}"
 
+# B' : bake des données préparées dans une image, depuis un container GPU Salad,
+# via crane (pas de daemon Docker). Voir salad-bake-init.sh.
+BAKE_GROUP="${SALAD_BAKE_GROUP:-strata-bake}"
+TARGET_IMAGE="${SALAD_TARGET_IMAGE:-}"
+REGISTRY_HOST="${SALAD_REGISTRY_HOST:-ghcr.io}"
+REGISTRY_USER="${SALAD_REGISTRY_USER:-}"
+REGISTRY_PASS="${SALAD_REGISTRY_PASS:-}"
+BAKE_CPU="${SALAD_BAKE_CPU:-16}"
+BAKE_MEMORY_MB="${SALAD_BAKE_MEMORY_MB:-61440}"
+BAKE_STORAGE_GB="${SALAD_BAKE_STORAGE_GB:-250}"
+
 # Installation + build de Strata AU DÉMARRAGE du container, depuis une image
 # générique (aucun registry à alimenter). 1 = activé.
 # Coût : tout est refait à chaque instance (disque Salad éphémère).
@@ -151,6 +166,7 @@ if [ "$RUNTIME_BUILD" = "1" ]; then
 else
   INIT_SCRIPT="$REPO_DIR/salad-container-init.sh"
 fi
+BAKE_INIT="$REPO_DIR/salad-bake-init.sh"
 LAST_GROUP_FILE="${SALAD_LAST_GROUP_FILE:-$HOME/.salad-strata-group}"
 
 # ===========================================================================
@@ -425,6 +441,74 @@ build_patch_body() {
   build_body | jq -c 'del(.name, .autostart_policy, .restart_policy)'
 }
 
+# ---------------------------------------------------------------------------
+# B' : body du container group de bake (GPU, crane, pas de networking).
+# ---------------------------------------------------------------------------
+build_bake_body() {
+  [ -f "$BAKE_INIT" ] || err "Fichier de bake introuvable : $BAKE_INIT"
+  [ -n "$IMAGE" ] || err "SALAD_IMAGE (image engine de base) est requis"
+  [ -n "$TARGET_IMAGE" ] || err "SALAD_TARGET_IMAGE est requis (image bakée à produire)"
+  [ -n "$REGISTRY_USER" ] || err "SALAD_REGISTRY_USER est requis"
+  [ -n "$REGISTRY_PASS" ] || err "SALAD_REGISTRY_PASS est requis"
+
+  local script env resources
+  script=$(cat "$BAKE_INIT")
+  env=$(jq -cn \
+    --arg base "$IMAGE" \
+    --arg target "$TARGET_IMAGE" \
+    --arg rhost "$REGISTRY_HOST" \
+    --arg ruser "$REGISTRY_USER" \
+    --arg rpass "$REGISTRY_PASS" \
+    --arg family "$STRATA_FAMILY" \
+    --arg model "$STRATA_MODEL" \
+    --arg context "$STRATA_CONTEXT" \
+    --arg vision "$STRATA_VISION" \
+    --arg low_ram "$STRATA_LOW_RAM" \
+    --arg kv "$STRATA_KV" \
+    '{
+      BASE_IMAGE: $base,
+      TARGET_IMAGE: $target,
+      REGISTRY_HOST: $rhost,
+      REGISTRY_USER: $ruser,
+      REGISTRY_PASS: $rpass,
+      STRATA_DATA: "/opt/strata-data",
+      FAMILY: $family,
+      MODEL: $model,
+      CONTEXT: $context,
+      VISION: $vision,
+      LOW_RAM: $low_ram
+    } + (if $kv != "" then {KV: $kv} else {} end)')
+
+  resources=$(jq -cn \
+    --argjson cpu "$BAKE_CPU" \
+    --argjson mem "$BAKE_MEMORY_MB" \
+    --argjson storage "$((BAKE_STORAGE_GB * 1073741824))" \
+    --arg gpu_id "$GPU_CLASS_ID" \
+    '{cpu: $cpu, memory: $mem, storage_amount: $storage, gpu_classes: [$gpu_id]}')
+
+  jq -cn \
+    --arg name "$BAKE_GROUP" \
+    --arg image "$IMAGE" \
+    --argjson env "$env" \
+    --argjson resources "$resources" \
+    --arg script "$script" \
+    '{
+      name: $name,
+      display_name: "Strata bake (B-prime)",
+      replicas: 1,
+      autostart_policy: true,
+      restart_policy: "never",
+      container: {
+        image: $image,
+        resources: $resources,
+        command: ["/bin/sh", "-c", $script],
+        environment_variables: $env,
+        image_caching: true,
+        priority: "high"
+      }
+    }'
+}
+
 # ===========================================================================
 # build / push
 # ===========================================================================
@@ -639,6 +723,51 @@ cmd_update() {
 }
 
 # ===========================================================================
+# bake (B') : préparer sur un container GPU Salad + pousser via crane
+# ===========================================================================
+cmd_bake() {
+  require_org_project
+  [ -n "$IMAGE" ] || err "SALAD_IMAGE (image engine de base, non bakée) est requis"
+  [ -f "$BAKE_INIT" ] || err "Fichier de bake introuvable : $BAKE_INIT"
+
+  if [ -z "$TARGET_IMAGE" ]; then
+    TARGET_IMAGE="${IMAGE%%:*}:${STRATA_MODEL}-baked"
+  fi
+
+  resolve_gpu_class_id
+
+  info "Bake B' : $IMAGE -> $TARGET_IMAGE (registry $REGISTRY_HOST)"
+  info "group=$BAKE_GROUP  cpu=$BAKE_CPU ram=${BAKE_MEMORY_MB}Mo storage=${BAKE_STORAGE_GB}Go  modèle=$STRATA_MODEL"
+
+  local path="/organizations/$ORG/projects/$PROJECT/containers"
+  local body
+  if group_exists "$BAKE_GROUP"; then
+    info "Container group \"$BAKE_GROUP\" existe -> PATCH"
+    body=$(build_bake_body | jq -c 'del(.name, .autostart_policy, .restart_policy)')
+    api_call PATCH "$path/$BAKE_GROUP" "$body" || err "Mise à jour échouée (${API_LAST_STATUS}) : $(api_detail)"
+  else
+    info "Création du container group de bake \"$BAKE_GROUP\""
+    body=$(build_bake_body)
+    api_call POST "$path" "$body" || err "Création échouée (${API_LAST_STATUS}) : $(api_detail)"
+  fi
+  save_last_group "$BAKE_GROUP"
+
+  info "Démarrage du bake..."
+  if ! api_call POST "$path/$BAKE_GROUP/start"; then
+    case "${API_LAST_STATUS}" in
+      400|409) info "Start ignoré (${API_LAST_STATUS}) : $(api_detail)" ;;
+      *) err "Démarrage échoué (${API_LAST_STATUS}) : $(api_detail)" ;;
+    esac
+  fi
+
+  echo ""
+  info "Suivi :  ./salad.sh logs $BAKE_GROUP"
+  info "Nettoyage après succès :  ./salad.sh delete $BAKE_GROUP"
+  info "Déploiement de l'image bakée :  SALAD_IMAGE=$TARGET_IMAGE SALAD_DATA_DIR=/opt/strata-data ./salad.sh deploy"
+  cmd_status "$BAKE_GROUP"
+}
+
+# ===========================================================================
 # start / stop / status / logs / delete
 # ===========================================================================
 cmd_start() {
@@ -736,6 +865,7 @@ Commandes:
   gpu-classes           Lister les classes GPU (trouver l'UUID RTX 3090)
   deploy [NAME]         Créer (ou MAJ) + démarrer le container group
   update [NAME]         Mettre à jour le container group existant (PATCH)
+  bake                  B' : préparer sur un container GPU Salad + push crane
   start  [NAME]         Démarrer
   stop   [NAME]         Arrêter
   status [NAME]         État, URL, instances
@@ -764,6 +894,7 @@ case "$1" in
   gpu-classes) shift; cmd_gpu_classes "$@" ;;
   deploy)      shift; cmd_deploy "$@" ;;
   update)      shift; cmd_update "$@" ;;
+  bake)        shift; cmd_bake "$@" ;;
   start)       shift; cmd_start "$@" ;;
   stop)        shift; cmd_stop "$@" ;;
   status)      shift; cmd_status "$@" ;;

@@ -56,6 +56,32 @@ SALAD_IMAGE=registry.example.com/strata:IQ2_XS-baked ./salad.sh deploy
 suivantes **sur ce nœud** démarrent sans re-pull ; une réalocation sur un **nouveau** nœud re-pull
 l'image entière.
 
+### B′ — bake sur Salad sans daemon Docker (crane)
+
+Comme `setup.py --setup` exige un GPU visible, on prépare **dans un container Salad RTX 3090**
+(le GPU est là), puis on empile les données préparées comme couche via **crane** (binaire statique,
+pas de Docker) et on push :
+
+```sh
+# PAT GitHub avec le scope write:packages (ou: gh auth refresh -s write:packages)
+export SALAD_IMAGE=ghcr.io/<user>/strata-salad:IQ2_XS          # image engine de base
+export SALAD_TARGET_IMAGE=ghcr.io/<user>/strata-salad:IQ2_XS-baked
+export SALAD_REGISTRY_USER=<user>
+export SALAD_REGISTRY_PASS=<PAT_write:packages>
+
+./salad.sh bake                     # crée un group GPU 16 vCPU / 60 Go / 250 Go, prépare + push
+./salad.sh logs strata-bake         # suivre
+./salad.sh delete strata-bake       # nettoyer quand c'est fini
+
+# déploiement de l'image bakée (aucun download)
+SALAD_IMAGE=ghcr.io/<user>/strata-salad:IQ2_XS-baked \
+SALAD_DATA_DIR=/opt/strata-data ./salad.sh deploy
+```
+
+Le tar des données est **streamé** (FIFO) vers crane → pas de double copie disque. La couche produite
+reste grosse (~100 Go, modèle + pack + MTP) : **GHCR peut la refuser** ; dans ce cas, repli sur un
+`registry:2` self-hosted / ACR / ECR.
+
 ## Prérequis
 
 - `bash`, `curl`, `jq`, `docker`.
