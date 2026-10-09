@@ -497,7 +497,7 @@ build_bake_body() {
       display_name: "Strata bake B-prime",
       replicas: 1,
       autostart_policy: true,
-      restart_policy: "never",
+      restart_policy: "on_failure",
       networking: {protocol: "http", auth: false, port: 8080},
       container: {
         image: $image,
