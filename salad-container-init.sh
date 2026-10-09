@@ -42,6 +42,24 @@ ulimit -l unlimited 2>/dev/null || true
 
 mkdir -p "$STRATA_DATA"
 
+# ---------------------------------------------------------------------------
+# IPv6 -> IPv4 : la gateway/probe SaladCloud communique en IPv6, mais Strata
+# bind $HOST=0.0.0.0 (IPv4 seul). Sans relais, la readiness probe ne passe
+# jamais (ready=False, 503 côté gateway) même si le serveur tourne.
+# socat écoute en IPv6 sur $PORT et forwarde vers 127.0.0.1:$PORT.
+# ---------------------------------------------------------------------------
+if ! command -v socat >/dev/null 2>&1; then
+  echo "[salad-init] installation de socat (relais IPv6 -> IPv4)"
+  apt-get update >/dev/null 2>&1 && apt-get install -y --no-install-recommends socat >/dev/null 2>&1
+  rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+fi
+if command -v socat >/dev/null 2>&1; then
+  socat "TCP6-LISTEN:${PORT},ipv6only=1,fork,reuseaddr" "TCP4:127.0.0.1:${PORT}" &
+  echo "[salad-init] socat [::]:${PORT} -> 127.0.0.1:${PORT} (pid $!)"
+else
+  echo "[salad-init] ATTENTION: socat indisponible -> la gateway Salad (IPv6) ne joindra pas l'app"
+fi
+
 echo "[salad-init] ------------------------------------------------------------"
 echo "[salad-init] Strata  famille=$FAMILY  modèle=$MODEL  ctx=$CONTEXT"
 echo "[salad-init] vision=$VISION  low_ram=$LOW_RAM  host=$HOST  port=$PORT"

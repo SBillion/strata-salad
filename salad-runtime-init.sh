@@ -68,6 +68,19 @@ chmod +x setup.sh 2>/dev/null || true
 ulimit -l unlimited 2>/dev/null || true
 mkdir -p "$STRATA_DATA"
 
+# --- 4b. IPv6 -> IPv4 (gateway/probe SaladCloud parle IPv6) -----------------
+# Strata bind 0.0.0.0 (IPv4 seul) : socat écoute en IPv6 sur $PORT et
+# forwarde vers 127.0.0.1:$PORT, sinon la readiness ne passe jamais.
+if ! command -v socat >/dev/null 2>&1; then
+  log "apt-get install socat (relais IPv6 -> IPv4)"
+  apt-get update >/dev/null 2>&1 && apt-get install -y --no-install-recommends socat >/dev/null 2>&1
+  rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+fi
+if command -v socat >/dev/null 2>&1; then
+  socat "TCP6-LISTEN:${PORT},ipv6only=1,fork,reuseaddr" "TCP4:127.0.0.1:${PORT}" &
+  log "socat [::]:${PORT} -> 127.0.0.1:${PORT}"
+fi
+
 log "Strata  famille=$FAMILY  modèle=$MODEL  ctx=$CONTEXT  vision=$VISION  low_ram=$LOW_RAM"
 log "data=$STRATA_DATA  ($(df -h "$STRATA_DATA" 2>/dev/null | tail -1))"
 log "setup.py va installer l'engine (pré-compilé) et télécharger le modèle (~40-70 Go)"
