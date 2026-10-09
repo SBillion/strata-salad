@@ -822,6 +822,27 @@ cmd_logs() {
   ' <<<"$API_LAST_RESPONSE" 2>/dev/null || echo "$API_LAST_RESPONSE"
 }
 
+# ===========================================================================
+# recreate — force la bascule de l'instance sur la version courante du group
+# ===========================================================================
+cmd_recreate() {
+  require_org_project
+  local name
+  name=$(get_group_name "${1:-}")
+  local path="/organizations/$ORG/projects/$PROJECT/containers/$name"
+
+  api_call GET "$path/instances" || err "Impossible de lister les instances : $(api_detail)"
+  local iid
+  iid=$(jq -r '(.instances // [])[0].id // empty' <<<"$API_LAST_RESPONSE")
+  [ -n "$iid" ] || err "Aucune instance pour $name"
+
+  info "Recreate de l'instance $iid ($name)..."
+  if ! api_call POST "$path/instances/$iid/recreate"; then
+    err "Recreate échoué (${API_LAST_STATUS}) : $(api_detail)"
+  fi
+  info "Recreate demandé — la nouvelle version démarre (re-pull l'image si bakée)."
+}
+
 cmd_delete() {
   require_org_project
   local name
@@ -855,6 +876,7 @@ Commandes:
   stop   [NAME]         Arrêter
   status [NAME]         État, URL, instances
   logs   [NAME]         Logs système
+  recreate [NAME]       Recréer l'instance (bascule sur la version courante)
   delete [NAME]         Supprimer (irréversible)
 
 Env requises : SALAD_API_KEY, SALAD_ORG, SALAD_PROJECT, SALAD_IMAGE
@@ -884,6 +906,7 @@ case "$1" in
   stop)        shift; cmd_stop "$@" ;;
   status)      shift; cmd_status "$@" ;;
   logs)        shift; cmd_logs "$@" ;;
+  recreate)    shift; cmd_recreate "$@" ;;
   delete)      shift; cmd_delete "$@" ;;
   *) usage; exit 1 ;;
 esac

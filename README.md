@@ -7,10 +7,13 @@ This repo packages three things:
 
 | File | Rôle |
 | --- | --- |
-| `salad.sh` | CLI REST SaladCloud : build/push de l'image, création/MAJ/démarrage du container group, statut, logs, suppression. |
-| `salad-container-init.sh` | Commande du container (Salad écrase l'`ENTRYPOINT`) : pose les defaults, tente `ulimit -l`, puis `exec` l'entrypoint Strata. |
-| `Dockerfile.baked` | Variante « modèle baké » : le modèle est téléchargé **pendant le build**, donc aucun download au démarrage. |
-| `.github/workflows/build.yml` | Build sur runner **x86_64** + push vers GHCR. |
+| `salad.sh` | CLI REST SaladCloud : build/push, deploy/update/start/stop/status/logs/recreate/delete, et `bake` (B′). |
+| `salad-container-init.sh` | Commande du container (Salad écrase l'`ENTRYPOINT`) : defaults, `socat` IPv6→IPv4, `exec` l'entrypoint Strata. |
+| `salad-runtime-init.sh` | Variante « install au démarrage » depuis une image générique (aucun registry). |
+| `salad-bake-portal.sh` | **B″ (recommandé)** : à lancer dans le terminal Portail d'une instance prête → bake + push via crane. |
+| `salad-bake-init.sh` | Commande du group de bake piloté par l'API (B′, expérimental). |
+| `Dockerfile.baked` | Variante « modèle baké » (multi-stage, socat inclus) pour un builder Docker avec GPU. |
+| `.github/workflows/build.yml` | Build de l'image engine sur runner **x86_64** + push GHCR (ne bake pas : pas de GPU). |
 
 ## Pourquoi une image bakée ?
 
@@ -56,31 +59,43 @@ SALAD_IMAGE=registry.example.com/strata:IQ2_XS-baked ./salad.sh deploy
 suivantes **sur ce nœud** démarrent sans re-pull ; une réalocation sur un **nouveau** nœud re-pull
 l'image entière.
 
-### B′ — bake sur Salad sans daemon Docker (crane)
+### B″ — bake depuis le terminal Portail d'une instance déjà prête (recommandé)
 
-Comme `setup.py --setup` exige un GPU visible, on prépare **dans un container Salad RTX 3090**
-(le GPU est là), puis on empile les données préparées comme couche via **crane** (binaire statique,
-pas de Docker) et on push :
+**C'est la méthode qui a fonctionné.** On réutilise une instance Strata **déjà prête** (son `/data`
+contient déjà modèle + pack + MTP → aucun re-download, aucun nouveau container à placer), et on
+empile `/data` comme couche via `crane` (binaire statique, pas de daemon Docker).
+
+1. Portail Salad → container group → clique l'instance **running** → onglet **Terminal**.
+2. Récupère un token GHCR (`write:packages`) : `gh auth token`, ou un PAT.
+3. Dans le terminal :
 
 ```sh
-# PAT GitHub avec le scope write:packages (ou: gh auth refresh -s write:packages)
-export SALAD_IMAGE=ghcr.io/<user>/strata-salad:IQ2_XS          # image engine de base
-export SALAD_TARGET_IMAGE=ghcr.io/<user>/strata-salad:IQ2_XS-baked
-export SALAD_REGISTRY_USER=<user>
-export SALAD_REGISTRY_PASS=<PAT_write:packages>
-
-./salad.sh bake                     # crée un group GPU 16 vCPU / 60 Go / 250 Go, prépare + push
-./salad.sh logs strata-bake         # suivre
-./salad.sh delete strata-bake       # nettoyer quand c'est fini
-
-# déploiement de l'image bakée (aucun download)
-SALAD_IMAGE=ghcr.io/<user>/strata-salad:IQ2_XS-baked \
-SALAD_DATA_DIR=/opt/strata-data ./salad.sh deploy
+export REGISTRY_USER=<user>
+export REGISTRY_PASS=<token/PAT write:packages>
+curl -fsSL https://raw.githubusercontent.com/SBillion/strata-salad/main/salad-bake-portal.sh | sh
 ```
 
-Le tar des données est **streamé** (FIFO) vers crane → pas de double copie disque. La couche produite
-reste grosse (~100 Go, modèle + pack + MTP) : **GHCR peut la refuser** ; dans ce cas, repli sur un
-`registry:2` self-hosted / ACR / ECR.
+Le script installe `crane`, se logue sur GHCR, puis `crane append --base <image engine> \
+--new_layer <tar de /data streamé> --new_tag <image-baked>` et push. Le tar est **streamé (FIFO)**
+→ pas de double copie disque. Fin attendue : `OK : ghcr.io/<user>/strata-salad:IQ2_XS-baked`.
+
+Ensuite, déployer l'image bakée (données déjà dedans) :
+
+```sh
+SALAD_IMAGE=ghcr.io/<user>/strata-salad:IQ2_XS-baked SALAD_DATA_DIR=/data ./salad.sh deploy
+# puis forcer la bascule de l'instance sur la nouvelle version :
+./salad.sh recreate strata-qwen
+```
+
+> **GHCR a accepté la couche ~100 Go** lors de notre essai → pas besoin d'un registry self-hosted.
+
+### B′ — bake piloté par l'API (`salad.sh bake`)
+
+`./salad.sh bake` crée un container group **GPU dédié** (16 vCPU / 60 Go / 250 Go) qui exécute
+`salad-bake-init.sh` (setup + `crane append` + push) puis on le supprime. **Non abouti lors de nos
+tests** : le group restait `pending` (préparation d'image côté Salad / placement). À réserver à
+l'expérimentation ; préférer **B″** ci-dessus. Flags utiles : `SALAD_TARGET_IMAGE`,
+`SALAD_REGISTRY_USER/PASS`, `SALAD_BAKE_CPU`, `SALAD_BAKE_STORAGE_GB`.
 
 ## Prérequis
 
@@ -144,7 +159,7 @@ téléchargement du modèle → serveur.
 | `STRATA_CONTEXT` | `32768` | |
 | `STRATA_VISION` | `no` | `no` \| `cpu` \| `yes` |
 | `STRATA_LOW_RAM` | `on` | voir « Pourquoi LOW_RAM=on » ci-dessous |
-| `SALAD_CPU` | `8` | vCPU ; **max 16** côté API |
+| `SALAD_CPU` | `8` | vCPU ; **max 16** — mettre **16** est le levier le plus utile en low-RAM |
 | `SALAD_MEMORY_MB` | `61440` | 60 Go ; **max ~61440 Mo** côté API |
 | `SALAD_STORAGE_GB` | `120` | disque éphémère |
 | `SALAD_PRIORITY` | `high` | `high` \| `medium` \| `low` \| `batch` |
@@ -167,6 +182,46 @@ Conséquence : le décodage est un peu plus lent (lectures disque), mais avec 24
 d'experts GPU absorbe le plus chaud. **Plus de vCPU (jusqu'à 16) accélère la part CPU** du chemin
 low-RAM. Si ton organisation permettait >60 Go de RAM, on pourrait passer `LOW_RAM=off` (experts
 résidents → plus rapide) ; au plafond documenté de 60 Go, garde `on`.
+
+## Optimisation
+
+### Quel modèle pour un RTX 3090 (24 Go VRAM, 60 Go RAM, 16 vCPU) ?
+
+En low-RAM, c'est le **CPU** qui calcule les experts que le GPU ne garde pas. Donc **plus de vCPU =
+décodage plus rapide**, et ça rend les modèles plus lourds supportables.
+
+| Modèle | Télécharg. | RAM | Aire experts | Qualité / vitesse |
+| --- | --- | --- | --- | --- |
+| `Q2_0` | 66 Go | 48 Go | 34 Go | le plus rapide |
+| `IQ2_XS` | 68 Go | 48 Go | 35.5 Go | recommandé (équilibre) |
+| `IQ3_XXS` | 76 Go | 60 Go | 43 Go | **meilleure qualité** tenant dans 60 Go, plus lent |
+| `IQ3_S` | 84 Go | **62 Go** | 50 Go | meilleure qualité mais **dépasse 60 Go** → à éviter |
+| `coder` (IQ1_M) | 58 Go | 32 Go | 23 Go | pour coder, plus rapide ; plus faible hors code |
+
+- **Meilleur modèle réaliste ici : `IQ3_XXS`** (RAM pile au plafond de 60 Go → tendu ; à tester). Sinon
+  garder `IQ2_XS`.
+- **`IQ3_S` non viable** au plafond 60 Go.
+- **Agent de code** : `STRATA_FAMILY=coder` (IQ1_M), rapide et léger, mais plus faible en général.
+
+### Leviers d'optimisation (dans l'ordre)
+
+1. **`SALAD_CPU=16`** : la part CPU du low-RAM en profite directement (gratuit, max API).
+2. **`SALAD_MEMORY_MB=61440`** (déjà max) : plus d'experts résidents = moins de lectures disque.
+3. **RAM > 60 Go ?** si ton org l'autorise : `STRATA_LOW_RAM=off` → experts résidents, **le plus
+   rapide** (mais ~50 Go de RAM résidents).
+4. **Contexte** : baisser `STRATA_CONTEXT` (ex. `16384`/`8192`) réduit le KV → plus de place pour le
+   cache d'experts GPU → plus rapide. Garder `32768` si les agents ont besoin d'un grand contexte.
+5. **`STRATA_KV=k8v4`** (INT8 K, 4-bit V) : KV plus petit en VRAM → plus d'experts sur le GPU.
+6. **Image bakée** : supprime le cold start (pas de download/pack).
+7. **`SALAD_PRIORITY=high`** : nœuds plus fiables/moins interrompus (coûte plus cher).
+8. Après un PATCH, la nouvelle version ne bascule pas toute seule : **`./salad.sh recreate`**.
+9. **`--parallel`** reste à 1 par défaut : sur 24 Go, 2 requêtes simultanées ralentissent chacune.
+
+Exemple « qualité max » :
+```sh
+SALAD_CPU=16 STRATA_MODEL=IQ3_XXS STRATA_CONTEXT=32768 STRATA_KV=k8v4 \
+SALAD_STARTUP_PROBE=0 SALAD_LIVENESS_PROBE=0 ./salad.sh deploy
+```
 
 ## Accès à l'API (gateway Salad + serveur Strata)
 
