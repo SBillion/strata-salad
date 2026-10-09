@@ -111,6 +111,11 @@ Le code CPU de l'engine est compilé pour la machine qui build. Depuis un Mac AR
 
 ## Limitations connues
 
+- **La gateway/probe SaladCloud communique en IPv6.** Strata bind `0.0.0.0` (IPv4 seul), donc sans
+  relais la `readiness_probe` ne passe **jamais** : le serveur tourne (logs `ready: …`) mais la
+  gateway renvoie un 503 « SaladCloud » et l'instance reste `ready=False`. Les deux scripts d'init
+  installent et lancent `socat TCP6-LISTEN:$PORT,ipv6only=1,fork TCP4:127.0.0.1:$PORT` pour ça.
+  (Alternative : faire binder Strata sur `::`.)
 - **RAM max 60 Go** par instance → `LOW_RAM=on` par défaut.
 - **`ulimit memlock` non exposable** par Salad (pas d'équivalent `--ulimit` de `docker run`) :
   `salad-container-init.sh` tente de lever la limite, sinon plus de page faults au chargement.
