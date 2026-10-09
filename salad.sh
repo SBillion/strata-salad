@@ -306,6 +306,8 @@ build_environment() {
     --arg api_key "$STRATA_API_KEY" \
     --arg allowed_hosts "$STRATA_ALLOWED_HOSTS" \
     --arg data_dir "$DATA_DIR" \
+    --arg hf_endpoint "${SALAD_HF_ENDPOINT:-}" \
+    --arg source "${SALAD_STRATA_SOURCE:-}" \
     '{
       FAMILY: $family,
       MODEL: $model,
@@ -319,7 +321,9 @@ build_environment() {
     + (if $data_dir      != "" then {STRATA_DATA: $data_dir}               else {} end)
     + (if $kv            != "" then {KV: $kv}                             else {} end)
     + (if $api_key       != "" then {API_KEY: $api_key, STRATA_API_KEY: $api_key} else {} end)
-    + (if $allowed_hosts != "" then {STRATA_ALLOWED_HOSTS: $allowed_hosts} else {} end)'
+    + (if $allowed_hosts != "" then {STRATA_ALLOWED_HOSTS: $allowed_hosts} else {} end)
+    + (if $hf_endpoint   != "" then {HF_ENDPOINT: $hf_endpoint}            else {} end)
+    + (if $source        != "" then {STRATA_SOURCE: $source}               else {} end)'
 }
 
 build_container() {
