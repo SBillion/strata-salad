@@ -332,6 +332,11 @@ Le code CPU de l'engine est compilé pour la machine qui build. Depuis un Mac AR
 
 ## Limitations connues
 
+- **L'image bakée (~100 Go, modèle + pack) ne démarre PAS sur Salad.** Testé : `Instance Start
+  Failure: Other` en boucle, même après avoir porté le disque au max (250 Go) et recréé l'instance.
+  L'image **non bakée** démarre sans problème (même commande, mêmes probes). → **Sur Salad, utiliser
+  l'image non bakée** (le modèle se télécharge au démarrage) ; réserver le bake aux builders Docker
+  avec GPU. Le disque par défaut (120 Go) est de toute façon trop petit pour l'image bakée.
 - **La gateway/probe SaladCloud communique en IPv6.** Strata bind `0.0.0.0` (IPv4 seul), donc sans
   relais la `readiness_probe` ne passe **jamais** : le serveur tourne (logs `ready: …`) mais la
   gateway renvoie un 503 « SaladCloud » et l'instance reste `ready=False`. Les deux scripts d'init
