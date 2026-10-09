@@ -498,6 +498,7 @@ build_bake_body() {
       replicas: 1,
       autostart_policy: true,
       restart_policy: "never",
+      networking: {protocol: "http", auth: false, port: 8080},
       container: {
         image: $image,
         resources: $resources,
@@ -595,7 +596,7 @@ group_exists() {
 }
 
 group_hostname() {
-  jq -r '.networking.hostname // empty' <<<"$API_LAST_RESPONSE" 2>/dev/null
+  jq -r '.networking.dns // .networking.hostname // empty' <<<"$API_LAST_RESPONSE" 2>/dev/null
 }
 
 # Si STRATA_ALLOWED_HOSTS="auto", on ne laisse passer que le hostname de la
@@ -814,7 +815,7 @@ cmd_status() {
     "CPU/RAM:    \(.container.resources.cpu) vCPU / \(.container.resources.memory) Mo",
     "Priorité:   \(.container.priority // "n/a")",
     "Port:       \(.networking.port // "n/a")  auth=\(.networking.auth // "n/a")",
-    "URL:        \(.networking.hostname // "n/a")"
+    "URL:        \(.networking.dns // .networking.hostname // "n/a")"
   ' <<<"$API_LAST_RESPONSE"
 
   echo "Instances:"
