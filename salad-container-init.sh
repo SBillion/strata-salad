@@ -84,12 +84,48 @@ echo "[salad-init] note: ~70 Go à télécharger au 1er démarrage (cache disque
 echo "[salad-init]       EPHEMERE sur Salad : refait à chaque nouvelle instance)"
 echo "[salad-init] ------------------------------------------------------------"
 
-# --- Handover à l'entrypoint officiel de l'image Strata ---------------------
-# Il lit FAMILY/MODEL/CONTEXT/VISION/HOST/PORT/API_KEY/LOW_RAM/KV et, au
-# premier lancement, exécute `setup.py --setup --yes` puis démarre le serveur.
-if [ -f /opt/strata/docker-entrypoint.sh ]; then
-  exec /opt/strata/docker-entrypoint.sh
-else
+# --- Chemin normal : on laisse l'entrypoint officiel faire setup + serve ----
+if [ -z "${CONVERSATION_CACHE_MIB:-}" ]; then
+  if [ -f /opt/strata/docker-entrypoint.sh ]; then
+    exec /opt/strata/docker-entrypoint.sh
+  fi
   echo "[salad-init] FATAL: /opt/strata/docker-entrypoint.sh absent (mauvaise image ?)" >&2
   exit 1
 fi
+
+# --- Cache de conversation (optionnel) --------------------------------------
+# setup.py n'expose pas --conversation-cache-mib : il faut l'écrire dans la
+# config générée. On refait donc setup nous-mêmes (--no-start), on patche la
+# config, puis on démarre. Utile pour les prompts longs multi-tours.
+prefix=""
+[ "$FAMILY" != "qwen" ] && prefix="$FAMILY-"
+tag="${prefix}$(printf '%s' "$MODEL" | tr 'A-Z' 'a-z')"
+cfg="$STRATA_DATA/config/strata-$tag.json"
+
+mkdir -p "$STRATA_DATA/config"
+if [ "${REINSTALL:-0}" = "1" ] || [ ! -f "$cfg" ]; then
+  echo "[salad-init] setup.py --setup (download + pack si nécessaire)"
+  .venv/bin/python setup.py --setup --yes \
+    --family "$FAMILY" --model "$MODEL" --context "$CONTEXT" --vision "$VISION" \
+    --low-ram "$LOW_RAM" \
+    ${KV:+--kv "$KV"} \
+    --data-dir "$STRATA_DATA" --host "$HOST" --port "$PORT" \
+    --api-key "${API_KEY:-}" --no-start
+fi
+
+if [ -f "$cfg" ]; then
+  .venv/bin/python - "$cfg" "$CONVERSATION_CACHE_MIB" <<'PY'
+import json, sys
+p, n = sys.argv[1], str(sys.argv[2])
+d = json.load(open(p))
+a = d.setdefault("args", [])
+if "--conversation-cache-mib" not in a:
+    a += ["--conversation-cache-mib", n]
+    json.dump(d, open(p, "w"))
+    print("[salad-init] conversation-cache-mib =", n)
+PY
+fi
+ln -sfn "$cfg" "/opt/strata/strata-$tag.json" 2>/dev/null || true
+
+echo "[salad-init] démarrage du serveur (avec cache de conversation)"
+exec .venv/bin/python setup.py --port "$PORT"

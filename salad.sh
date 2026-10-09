@@ -56,6 +56,9 @@
 #   SALAD_BAKE           (opt)     1 = télécharger le modèle AU BUILD (image bakée)
 #   SALAD_KEEP_GGUF      (opt)     1 (défaut) | 0 = supprimer les GGUF bruts de
 #                                  l'image bakée (~-68 Go ; LOW_RAM=on requis)
+#   SALAD_HF_ENDPOINT    (opt)     miroir HuggingFace (ex: https://hf-mirror.com)
+#   SALAD_STRATA_SOURCE  (opt)     huggingface | modelscope
+#   SALAD_CONVERSATION_CACHE_MIB (opt) cache de conversation multi-tours (ex: 8192)
 #   B' (bake) : SALAD_TARGET_IMAGE (image à produire, sinon <base>:<MODEL>-baked),
 #               SALAD_REGISTRY_HOST (ghcr.io), SALAD_REGISTRY_USER, SALAD_REGISTRY_PASS,
 #               SALAD_BAKE_GROUP (strata-bake), SALAD_BAKE_CPU (16),
@@ -308,6 +311,7 @@ build_environment() {
     --arg data_dir "$DATA_DIR" \
     --arg hf_endpoint "${SALAD_HF_ENDPOINT:-}" \
     --arg source "${SALAD_STRATA_SOURCE:-}" \
+    --arg conv_cache "${SALAD_CONVERSATION_CACHE_MIB:-}" \
     '{
       FAMILY: $family,
       MODEL: $model,
@@ -323,7 +327,8 @@ build_environment() {
     + (if $api_key       != "" then {API_KEY: $api_key, STRATA_API_KEY: $api_key} else {} end)
     + (if $allowed_hosts != "" then {STRATA_ALLOWED_HOSTS: $allowed_hosts} else {} end)
     + (if $hf_endpoint   != "" then {HF_ENDPOINT: $hf_endpoint}            else {} end)
-    + (if $source        != "" then {STRATA_SOURCE: $source}               else {} end)'
+    + (if $source        != "" then {STRATA_SOURCE: $source}               else {} end)
+    + (if $conv_cache    != "" then {CONVERSATION_CACHE_MIB: $conv_cache}  else {} end)'
 }
 
 build_container() {
