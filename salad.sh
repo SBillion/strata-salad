@@ -109,6 +109,15 @@ STARTUP_FAILURE="${SALAD_STARTUP_FAILURE:-20}"
 LIVENESS_PERIOD="${SALAD_LIVENESS_PERIOD:-5}"
 LIVENESS_FAILURE="${SALAD_LIVENESS_FAILURE:-3}"
 
+# Valeurs BRUTES (avant défauts) : permet à `update` de garder celles du group
+# existant quand l'utilisateur ne les a pas fournies.
+_USER_FAMILY="${STRATA_FAMILY:-}"
+_USER_MODEL="${STRATA_MODEL:-}"
+_USER_CONTEXT="${STRATA_CONTEXT:-}"
+_USER_VISION="${STRATA_VISION:-}"
+_USER_LOW_RAM="${STRATA_LOW_RAM:-}"
+_USER_KV="${STRATA_KV:-}"
+
 STRATA_FAMILY="${STRATA_FAMILY:-qwen}"
 STRATA_MODEL="${STRATA_MODEL:-IQ2_XS}"
 STRATA_CONTEXT="${STRATA_CONTEXT:-32768}"
@@ -245,7 +254,7 @@ api_call() {
   done
 }
 
-api_detail() { jq -r '.detail // .title // "erreur inconnue"' <<<"$API_LAST_RESPONSE" 2>/dev/null || echo "erreur"; }
+api_detail() { jq -r 'if .errors then (.errors | to_entries | map("\(.key): \(.value|tostring)") | join("; ")) else (.detail // .title // "erreur inconnue") end' <<<"$API_LAST_RESPONSE" 2>/dev/null || echo "erreur"; }
 
 save_last_group() { echo "$1" >"$LAST_GROUP_FILE"; info "Dernier container group: $1"; }
 
@@ -686,26 +695,32 @@ cmd_update() {
   GROUP_NAME="$name"
   local path="/organizations/$ORG/projects/$PROJECT/containers/$name"
 
-  # PATCH remplace TOUT environment_variables : on relit l'existant pour ne pas
-  # effacer la clé API (si STRATA_API_KEY n'est pas fourni) et pour récupérer le
-  # hostname de la gateway (allowed_hosts=auto).
+  # On part de la config ACTUELLE du group : seuls les champs surchargés (env
+  # SALAD_*/STRATA_*) changent. Corrige aussi le cas où SALAD_IMAGE n'est pas
+  # fourni (sinon Container.Image vide -> 400).
   local existing=""
-  if api_call GET "$path"; then
-    existing="$API_LAST_RESPONSE"
-    if [ -z "$STRATA_API_KEY" ]; then
-      STRATA_API_KEY=$(jq -r '
-        (.container.environment_variables.STRATA_API_KEY //
-         .container.environment_variables.API_KEY // empty)' <<<"$existing")
-      [ -n "$STRATA_API_KEY" ] && info "Clé API Strata conservée depuis le group existant"
-    fi
-    if [ "$STRATA_ALLOWED_HOSTS" = "auto" ]; then
-      local host
-      host=$(group_hostname)
-      [ -n "$host" ] && { STRATA_ALLOWED_HOSTS="$host"; info "allowed_hosts = $host (gateway)"; }
-    fi
+  api_call GET "$path" || err "Group $name introuvable : $(api_detail)"
+  existing="$API_LAST_RESPONSE"
+
+  [ -n "$IMAGE" ]          || IMAGE=$(jq -r '.container.image' <<<"$existing")
+  [ -n "${SALAD_DISPLAY_NAME:-}" ] || DISPLAY_NAME=$(jq -r '.display_name // empty' <<<"$existing")
+  [ -n "${SALAD_CPU:-}" ]          || CPU=$(jq -r '.container.resources.cpu' <<<"$existing")
+  [ -n "${SALAD_MEMORY_MB:-}" ]    || MEMORY_MB=$(jq -r '.container.resources.memory' <<<"$existing")
+  [ -n "${SALAD_SHM_MB:-}" ]       || SHM_MB=$(jq -r '.container.resources.shm_size // 16384' <<<"$existing")
+  [ -n "${SALAD_STORAGE_GB:-}" ]   || STORAGE_GB=$(( $(jq -r '.container.resources.storage_amount' <<<"$existing") / 1073741824 ))
+  [ -n "$_USER_MODEL" ]       || STRATA_MODEL=$(jq -r '.container.environment_variables.MODEL // "IQ2_XS"' <<<"$existing")
+  [ -n "$_USER_FAMILY" ]      || STRATA_FAMILY=$(jq -r '.container.environment_variables.FAMILY // "qwen"' <<<"$existing")
+  [ -n "$_USER_CONTEXT" ]     || STRATA_CONTEXT=$(jq -r '.container.environment_variables.CONTEXT // "32768"' <<<"$existing")
+  [ -n "$_USER_VISION" ]      || STRATA_VISION=$(jq -r '.container.environment_variables.VISION // "no"' <<<"$existing")
+  [ -n "$_USER_LOW_RAM" ]     || STRATA_LOW_RAM=$(jq -r '.container.environment_variables.LOW_RAM // "on"' <<<"$existing")
+  [ -n "$_USER_KV" ]          || STRATA_KV=$(jq -r '.container.environment_variables.KV // ""' <<<"$existing")
+
+  if [ -z "$STRATA_API_KEY" ]; then
+    STRATA_API_KEY=$(jq -r '(.container.environment_variables.STRATA_API_KEY // .container.environment_variables.API_KEY // empty)' <<<"$existing")
+    [ -n "$STRATA_API_KEY" ] && info "Clé API Strata conservée depuis le group existant"
   fi
 
-  info "PATCH $name"
+  info "PATCH $name (image=$(basename "$IMAGE"), cpu=$CPU, ram=${MEMORY_MB}Mo, storage=${STORAGE_GB}Go, modèle=$STRATA_MODEL)"
   local body
   body=$(build_patch_body)
   if ! api_call PATCH "$path" "$body"; then
@@ -869,9 +884,7 @@ Commandes:
   push                  Pousser l'image vers le registry
   gpu-classes           Lister les classes GPU (trouver l'UUID RTX 3090)
   deploy [NAME]         Créer (ou MAJ) + démarrer le container group
-  run    [NAME]         Alias de deploy (créer/MAJ + démarrer)
   update [NAME]         Mettre à jour le container group existant (PATCH)
-  edit   [NAME]         Alias de update (modifier la config, sans démarrer)
   bake                  B' : préparer sur un container GPU Salad + push crane
   start  [NAME]         Démarrer
   stop   [NAME]         Arrêter
@@ -901,9 +914,7 @@ case "$1" in
   push)        shift; cmd_push "$@" ;;
   gpu-classes) shift; cmd_gpu_classes "$@" ;;
   deploy)      shift; cmd_deploy "$@" ;;
-  run)         shift; cmd_deploy "$@" ;;
   update)      shift; cmd_update "$@" ;;
-  edit)        shift; cmd_update "$@" ;;
   bake)        shift; cmd_bake "$@" ;;
   start)       shift; cmd_start "$@" ;;
   stop)        shift; cmd_stop "$@" ;;
