@@ -53,7 +53,7 @@ rm -f "$FIFO"
 mkfifo "$FIFO"
 
 echo "[bake] append /$REL sur $BASE_IMAGE -> $TARGET_IMAGE (push GHCR)"
-crane append --base "$BASE_IMAGE" --new_layer "$FIFO" --tag "$TARGET_IMAGE" &
+crane append --base "$BASE_IMAGE" --new_layer "$FIFO" --new_tag "$TARGET_IMAGE" &
 CPID=$!
 tar -C / -cf "$FIFO" "$REL"
 wait "$CPID"
