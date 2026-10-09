@@ -494,7 +494,7 @@ build_bake_body() {
     --arg script "$script" \
     '{
       name: $name,
-      display_name: "Strata bake (B-prime)",
+      display_name: "Strata bake B-prime",
       replicas: 1,
       autostart_policy: true,
       restart_policy: "never",
