@@ -59,11 +59,6 @@ on:
         description: "Push the image to GHCR"
         type: boolean
         default: true
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/build.yml"
-      - "Dockerfile.baked"
 
 permissions:
   contents: read
