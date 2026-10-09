@@ -795,6 +795,47 @@ cmd_stop() {
   info "Container group $name arrêté"
 }
 
+# ---------------------------------------------------------------------------
+# list — tous les container groups du projet
+# ---------------------------------------------------------------------------
+cmd_list() {
+  require_org_project
+  api_call GET "/organizations/$ORG/projects/$PROJECT/containers" || err "Impossible de lister : $(api_detail)"
+  jq -r '
+    (.items // [])
+    | if length == 0 then "(aucun container group)"
+      else .[] | "\(.name)\t\(.current_state.status // "?")\t\(.current_state.replicas // 0)/\(.replicas // 0)\t\((.networking // {}).dns // "-")"
+      end
+  ' <<<"$API_LAST_RESPONSE" | column -t -s $'\t' 2>/dev/null || \
+  jq -r '(.items // [])[] | "\(.name)  \(.current_state.status // "?")  \(.current_state.replicas // 0)/\(.replicas // 0)"' <<<"$API_LAST_RESPONSE"
+}
+
+# ---------------------------------------------------------------------------
+# restart / stop-all / start-all
+# ---------------------------------------------------------------------------
+cmd_restart() {
+  local name
+  name=$(get_group_name "${1:-}")
+  cmd_stop "$name"
+  sleep 3
+  cmd_start "$name"
+}
+
+_cmd_all() {
+  local action="$1"
+  require_org_project
+  api_call GET "/organizations/$ORG/projects/$PROJECT/containers" || err "Impossible de lister : $(api_detail)"
+  local names
+  names=$(jq -r '(.items // [])[].name' <<<"$API_LAST_RESPONSE")
+  [ -n "$names" ] || { info "Aucun container group"; return 0; }
+  local n
+  for n in $names; do
+    if [ "$action" = "stop" ]; then cmd_stop "$n" || true; else cmd_start "$n" || true; fi
+  done
+}
+cmd_stop_all()  { _cmd_all stop; }
+cmd_start_all() { _cmd_all start; }
+
 cmd_status() {
   require_org_project
   local name
@@ -886,8 +927,12 @@ Commandes:
   deploy [NAME]         Créer (ou MAJ) + démarrer le container group
   update [NAME]         Mettre à jour le container group existant (PATCH)
   bake                  B' : préparer sur un container GPU Salad + push crane
+  list                  Lister tous les container groups (nom, état, URL)
   start  [NAME]         Démarrer
   stop   [NAME]         Arrêter
+  restart [NAME]        Arrêter puis démarrer
+  start-all             Démarrer tous les container groups
+  stop-all              Arrêter tous les container groups
   status [NAME]         État, URL, instances
   logs   [NAME]         Logs système
   recreate [NAME]       Recréer l'instance (bascule sur la version courante)
@@ -918,6 +963,10 @@ case "$1" in
   bake)        shift; cmd_bake "$@" ;;
   start)       shift; cmd_start "$@" ;;
   stop)        shift; cmd_stop "$@" ;;
+  restart)     shift; cmd_restart "$@" ;;
+  start-all)   shift; cmd_start_all "$@" ;;
+  stop-all)    shift; cmd_stop_all "$@" ;;
+  list|ls)     shift; cmd_list "$@" ;;
   status)      shift; cmd_status "$@" ;;
   logs)        shift; cmd_logs "$@" ;;
   recreate)    shift; cmd_recreate "$@" ;;
