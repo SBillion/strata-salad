@@ -451,7 +451,11 @@ build_bake_body() {
   [ -n "$REGISTRY_USER" ] || err "SALAD_REGISTRY_USER est requis"
   [ -n "$REGISTRY_PASS" ] || err "SALAD_REGISTRY_PASS est requis"
 
-  local script env resources
+  # Même config que le déploiement qui fonctionne (build_body) :
+  # networking protégé (auth:true), shm, restart_policy, readiness probe.
+  # On ne change que la command + l'env, et on retire startup/liveness
+  # (le bake ne sert pas /health : sinon il serait tué à 60 min).
+  local script env body
   script=$(cat "$BAKE_INIT")
   env=$(jq -cn \
     --arg base "$IMAGE" \
@@ -479,35 +483,23 @@ build_bake_body() {
       LOW_RAM: $low_ram
     } + (if $kv != "" then {KV: $kv} else {} end)')
 
-  resources=$(jq -cn \
+  body=$(build_body)
+
+  jq -c \
+    --arg name "$BAKE_GROUP" \
+    --arg script "$script" \
+    --argjson env "$env" \
     --argjson cpu "$BAKE_CPU" \
     --argjson mem "$BAKE_MEMORY_MB" \
     --argjson storage "$((BAKE_STORAGE_GB * 1073741824))" \
-    --arg gpu_id "$GPU_CLASS_ID" \
-    '{cpu: $cpu, memory: $mem, storage_amount: $storage, gpu_classes: [$gpu_id]}')
-
-  jq -cn \
-    --arg name "$BAKE_GROUP" \
-    --arg image "$IMAGE" \
-    --argjson env "$env" \
-    --argjson resources "$resources" \
-    --arg script "$script" \
-    '{
-      name: $name,
-      display_name: "Strata bake B-prime",
-      replicas: 1,
-      autostart_policy: true,
-      restart_policy: "on_failure",
-      networking: {protocol: "http", auth: false, port: 8080},
-      container: {
-        image: $image,
-        resources: $resources,
-        command: ["/bin/sh", "-c", $script],
-        environment_variables: $env,
-        image_caching: true,
-        priority: "high"
-      }
-    }'
+    'del(.startup_probe, .liveness_probe)
+     | .name = $name
+     | .display_name = "Strata bake B-prime"
+     | .container.resources.cpu = $cpu
+     | .container.resources.memory = $mem
+     | .container.resources.storage_amount = $storage
+     | .container.command = ["/bin/sh", "-c", $script]
+     | .container.environment_variables = $env' <<<"$body"
 }
 
 # ===========================================================================
