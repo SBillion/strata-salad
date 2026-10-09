@@ -94,21 +94,20 @@ COUNTRY_CODES="${SALAD_COUNTRY_CODES:-}"
 PORT="${SALAD_PORT:-8080}"
 NET_AUTH="${SALAD_NET_AUTH:-true}"
 
-# Probes (secondes). Startup = fenêtre maximale pour le 1er téléchargement du
-# modèle (~70 Go, image non bakée). bornes API : initial_delay<=1200,
-# period<=120, failure_threshold<=20 -> fenêtre max 1200 + 20*120 = 3600s.
-# IMPORTANT : sur l'image NON bakée, le cold start (~100 min à ~12 Mo/s,
-# IQ2_XS = 2x39 Go) DÉPASSE la fenêtre max de 60 min : le startup probe fait
-# alors redémarrer le container et le disque éphémère perd le download.
-# -> mettez SALAD_STARTUP_PROBE=0 (et éventuellement SALAD_LIVENESS_PROBE=0).
-# La readiness seule ne tue jamais le container.
+# Probes HTTP sur /health (port 8080). Calquées sur le container vLLM (llm) :
+# - startup : large fenêtre pour laisser le download/chargement (limite API
+#   failure<=20, period<=120, initial<=1200 -> fenêtre max 60 min).
+#   Défaut vL-style : 30 + 20*120 = 40.5 min.
+# - readiness / liveness : /health, cadence rapide.
+# NB Strata : /v1/models est protégé par la clé API ; /health est ouvert et ne
+# répond 200 que quand l'engine est prêt -> on l'utilise partout.
 STARTUP_PROBE="${SALAD_STARTUP_PROBE:-1}"
 LIVENESS_PROBE="${SALAD_LIVENESS_PROBE:-1}"
-STARTUP_INITIAL_DELAY="${SALAD_STARTUP_INITIAL_DELAY:-1200}"
+STARTUP_INITIAL_DELAY="${SALAD_STARTUP_INITIAL_DELAY:-30}"
 STARTUP_PERIOD="${SALAD_STARTUP_PERIOD:-120}"
 STARTUP_FAILURE="${SALAD_STARTUP_FAILURE:-20}"
-LIVENESS_PERIOD="${SALAD_LIVENESS_PERIOD:-30}"
-LIVENESS_FAILURE="${SALAD_LIVENESS_FAILURE:-5}"
+LIVENESS_PERIOD="${SALAD_LIVENESS_PERIOD:-5}"
+LIVENESS_FAILURE="${SALAD_LIVENESS_FAILURE:-3}"
 
 STRATA_FAMILY="${STRATA_FAMILY:-qwen}"
 STRATA_MODEL="${STRATA_MODEL:-IQ2_XS}"
@@ -377,8 +376,8 @@ build_probes() {
     --argjson l_fail "$LIVENESS_FAILURE" \
     '{ readiness_probe: {
         http: {headers: [], path: "/health", port: $port, scheme: "http"},
-        initial_delay_seconds: 10,
-        period_seconds: 10,
+        initial_delay_seconds: 0,
+        period_seconds: 5,
         failure_threshold: 3,
         success_threshold: 1,
         timeout_seconds: 5
@@ -389,7 +388,7 @@ build_probes() {
         period_seconds: $s_period,
         failure_threshold: $s_fail,
         success_threshold: 1,
-        timeout_seconds: 10
+        timeout_seconds: 5
       } } else {} end)
     + (if $l_on == 1 then { liveness_probe: {
         http: {headers: [], path: "/health", port: $port, scheme: "http"},
@@ -397,7 +396,7 @@ build_probes() {
         period_seconds: $l_period,
         failure_threshold: $l_fail,
         success_threshold: 1,
-        timeout_seconds: 10
+        timeout_seconds: 5
       } } else {} end)'
 }
 
@@ -870,7 +869,9 @@ Commandes:
   push                  Pousser l'image vers le registry
   gpu-classes           Lister les classes GPU (trouver l'UUID RTX 3090)
   deploy [NAME]         Créer (ou MAJ) + démarrer le container group
+  run    [NAME]         Alias de deploy (créer/MAJ + démarrer)
   update [NAME]         Mettre à jour le container group existant (PATCH)
+  edit   [NAME]         Alias de update (modifier la config, sans démarrer)
   bake                  B' : préparer sur un container GPU Salad + push crane
   start  [NAME]         Démarrer
   stop   [NAME]         Arrêter
@@ -900,7 +901,9 @@ case "$1" in
   push)        shift; cmd_push "$@" ;;
   gpu-classes) shift; cmd_gpu_classes "$@" ;;
   deploy)      shift; cmd_deploy "$@" ;;
+  run)         shift; cmd_deploy "$@" ;;
   update)      shift; cmd_update "$@" ;;
+  edit)        shift; cmd_update "$@" ;;
   bake)        shift; cmd_bake "$@" ;;
   start)       shift; cmd_start "$@" ;;
   stop)        shift; cmd_stop "$@" ;;
