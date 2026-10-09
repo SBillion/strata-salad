@@ -42,6 +42,11 @@ on:
         type: choice
         options: ["no", "cpu", "yes"]
         default: "no"
+      low_ram:
+        description: "LOW_RAM: on = experts from the pack (fits 60GB RAM); off = resident (no pack, faster, needs more RAM)"
+        type: choice
+        options: ["on", "off", "auto"]
+        default: "on"
       cuda_arch:
         description: "CUDA arch (86 = RTX 3090)"
         type: string
@@ -76,15 +81,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Free disk space (bake only)
+        if: ${{ inputs.bake == true }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          docker image prune -af || true
+          df -h /
+
       - name: Disk space preflight
         shell: bash
         run: |
           set -euo pipefail
-          avail_kb=$(df -Pk /var/lib/docker 2>/dev/null | awk 'NR==2{print $4}' || df -Pk / | awk 'NR==2{print $4}')
+          avail_kb=$(df -Pk / | awk 'NR==2{print $4}')
           avail_gb=$((avail_kb / 1048576))
-          echo "Free disk on build path: ${avail_gb} GB"
-          if [ "${{ inputs.bake || 'false' }}" = "true" ] && [ "$avail_gb" -lt 180 ]; then
-            echo "::error::bake=true needs >=180 GB free (have ${avail_gb} GB). Use a self-hosted/larger runner via the 'runner' input."
+          echo "Free disk on /: ${avail_gb} GB"
+          if [ "${{ inputs.bake || 'false' }}" = "true" ] && [ "$avail_gb" -lt 90 ]; then
+            echo "::error::bake=true needs >=90 GB free (have ${avail_gb} GB). Hosted runners top out ~110 GB (measured); a low-RAM bake (pack + model ~104 GB) does NOT fit — use low_ram=off, or a self-hosted/larger runner via the 'runner' input."
             exit 1
           fi
 
@@ -115,6 +130,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          docker builder prune -af || true
           docker build \
             --platform linux/amd64 \
             -t "${IMAGE}:${{ inputs.model }}-baked" \
@@ -123,7 +139,7 @@ jobs:
             --build-arg "STRATA_MODEL=${{ inputs.model || 'IQ2_XS' }}" \
             --build-arg "STRATA_CONTEXT=${{ inputs.context || '32768' }}" \
             --build-arg "STRATA_VISION=${{ inputs.vision || 'no' }}" \
-            --build-arg "STRATA_LOW_RAM=on" \
+            --build-arg "STRATA_LOW_RAM=${{ inputs.low_ram || 'on' }}" \
             --build-arg "STRATA_KEEP_GGUF=${{ inputs.keep_gguf == false && '0' || '1' }}" \
             -f Dockerfile.baked .
 
