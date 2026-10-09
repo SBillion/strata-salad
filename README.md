@@ -149,6 +149,8 @@ téléchargement du modèle → serveur.
 | `SALAD_STORAGE_GB` | `120` | disque éphémère |
 | `SALAD_PRIORITY` | `high` | `high` \| `medium` \| `low` \| `batch` |
 | `SALAD_NET_AUTH` | `true` | auth par clé API Salad sur la gateway |
+| `STRATA_API_KEY` | (généré) | clé du serveur Strata (injectée aussi comme `STRATA_API_KEY`) |
+| `STRATA_ALLOWED_HOSTS` | `auto` | `auto` = gateway de **ce** group ; csv ; `.exemple.com` ; `*` |
 
 Un 3090 (24 Go de VRAM) tient Q2_0 et IQ2_XS ; les tailles IQ3 demandent plus de RAM/VRAM.
 Toutes les variables sont listées en tête de `salad.sh`.
@@ -165,6 +167,75 @@ Conséquence : le décodage est un peu plus lent (lectures disque), mais avec 24
 d'experts GPU absorbe le plus chaud. **Plus de vCPU (jusqu'à 16) accélère la part CPU** du chemin
 low-RAM. Si ton organisation permettait >60 Go de RAM, on pourrait passer `LOW_RAM=off` (experts
 résidents → plus rapide) ; au plafond documenté de 60 Go, garde `on`.
+
+## Accès à l'API (gateway Salad + serveur Strata)
+
+Deux couches d'authentification **indépendantes**, chacune avec sa clé :
+
+| Couche | En-tête HTTP | Clé |
+| --- | --- | --- |
+| Gateway Salad (`SALAD_NET_AUTH=true`) | `Salad-Api-Key` | **clé API SaladCloud** (`SALAD_API_KEY`, portail) |
+| Serveur Strata (`api_key`) | `Authorization: Bearer` (champ `apiKey` du client) | **clé Strata** générée par `salad.sh` |
+
+Détail qui piège : au démarrage, l'entrypoint de Strata lit **`STRATA_API_KEY`** (pas `API_KEY`) et ne
+relance **pas** `setup.py` si la config existe déjà. Une **image bakée** porte donc un
+`strata-<model>.json` avec `"api_key": ""` (le setup du build n'avait pas de clé) : sans injection, la
+clé fournie par `salad.sh` est ignorée et le serveur reste sans auth. Les scripts d'init propagent
+`API_KEY → STRATA_API_KEY` pour couvrir ce cas.
+
+### DNS rebinding (403 « Host … is not allowed »)
+
+Sans clé serveur, Strata n'accepte que les noms d'hôte connus (protection DNS rebinding). La gateway
+Salad relaie les requêtes avec `Host: <group>.salad.cloud`, un nom inconnu du serveur → **403**. Au
+déploiement, `salad.sh` résout le hostname exact du group (champ API `networking.dns`) et pose
+`STRATA_ALLOWED_HOSTS` avec ce nom. Valeurs acceptées :
+
+- `auto` (défaut) : uniquement la gateway de **ce** container group ;
+- liste séparée par des virgules (`strata.example.com,nas.lan`) ; un préfixe point (`.example.com`)
+  couvre le domaine et ses sous-domaines ;
+- `*` : désactive complètement le contrôle (à éviter).
+
+Avec une clé Strata (`STRATA_API_KEY`), le contrôle est **de toute façon désactivé** : le serveur fait
+`if svc.api_key or host_allowed(...)`. L'allowlist ne sert donc qu'en mode sans clé serveur.
+
+### Client OpenAI-compatible
+
+Endpoint : `https://<group>.salad.cloud/v1`, modèle rapporté par `GET /v1/models`
+(ici `qwen3.8-flash-next-iq2_xs`). Exemple OpenCode (`~/.config/opencode/opencode.json`) — sans clé
+serveur, `apiKey` est un dummy et la seule auth est l'en-tête Salad :
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "saladcloud/qwen3.8-flash-next-iq2_xs",
+  "provider": {
+    "saladcloud": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Strata",
+      "options": {
+        "baseURL": "https://<group>.salad.cloud/v1",
+        "apiKey": "dummy",
+        "headers": { "Salad-Api-Key": "{env:SALAD_API_KEY}" }
+      },
+      "models": {
+        "qwen3.8-flash-next-iq2_xs": {
+          "name": "Qwen3.8 Flash Next (IQ2_XS)",
+          "limit": { "context": 32768, "output": 8192 }
+        }
+      }
+    }
+  }
+}
+```
+
+Vérifier l'accès :
+
+```sh
+curl -H "Salad-Api-Key: $SALAD_API_KEY" "https://<group>.salad.cloud/v1/models"
+```
+
+> Si le serveur a une clé Strata (`STRATA_API_KEY`), mettez **cette** clé dans `apiKey` (le client
+> l'envoie en `Authorization: Bearer`) et gardez `Salad-Api-Key` pour la gateway.
 
 ## CI (GitHub Actions)
 
@@ -201,10 +272,16 @@ Le code CPU de l'engine est compilé pour la machine qui build. Depuis un Mac AR
   suffisante.
 - **Toute modification du container group recrée l'instance** : comme le disque est éphémère, un
   `update`/PATCH en plein téléchargement repart de zéro. Configurez tout **avant** de démarrer.
+- **Mise à jour = version « pending ».** Un PATCH crée une nouvelle version (`pending_change: true`)
+  mais Salad ne remplace pas toujours l'instance toute seule : elle continue de servir l'ancienne
+  version. Pour forcer la bascule **sans re-télécharger l'image**, recréer l'instance
+  (`POST …/containers/<group>/instances/<id>/recreate`) ; c'est ce qui a été utilisé pour appliquer le
+  fix `allowed_hosts`. `salad.sh update` ne démarre pas le group, et un `start` peut relancer
+  l'ancienne version tant que la nouvelle est en attente.
+- **DNS rebinding / clés API** : voir « Accès à l'API » ci-dessus (403 « Host … is not allowed »,
+  `STRATA_ALLOWED_HOSTS`, propagation `API_KEY → STRATA_API_KEY`).
 - **`networking` non modifiable après création** (sauf `port`) : `auth`, `load_balancer` et les
   timeouts se fixent à la création, sinon il faut recréer le group.
-- La clé API du serveur Strata est générée par `salad.sh` (ou `STRATA_API_KEY`). La gateway Salad
-  peut en plus exiger la clé API Salad (`SALAD_NET_AUTH=true`).
 
 ## Crédits
 
