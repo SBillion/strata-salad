@@ -239,6 +239,8 @@ décodage plus rapide**, et ça rend les modèles plus lourds supportables.
 7. **`SALAD_PRIORITY=high`** : nœuds plus fiables/moins interrompus (coûte plus cher).
 8. Après un PATCH, la nouvelle version ne bascule pas toute seule : **`./salad.sh recreate`**.
 9. **`--parallel`** reste à 1 par défaut : sur 24 Go, 2 requêtes simultanées ralentissent chacune.
+10. **`SALAD_CONVERSATION_CACHE_MIB=8192`** : cache de conversation multi-tours (relances de projets
+    longs sans re-lire ~90 % du prompt). Écrit dans la config au setup.
 
 Exemple « qualité max » :
 ```sh
