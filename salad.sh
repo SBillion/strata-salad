@@ -730,8 +730,10 @@ cmd_update() {
   fi
 
   info "PATCH $name (image=$(basename "$IMAGE"), cpu=$CPU, ram=${MEMORY_MB}Mo, storage=${STORAGE_GB}Go, modèle=$STRATA_MODEL)"
-  local body
+  local body old_env
   body=$(build_patch_body)
+  old_env=$(jq -c '.container.environment_variables // {}' <<<"$existing")
+  body=$(jq -c --argjson old "$old_env" '.container.environment_variables = ($old + .container.environment_variables)' <<<"$body")
   if ! api_call PATCH "$path" "$body"; then
     err "Mise à jour échouée (${API_LAST_STATUS}) : $(api_detail)"
   fi

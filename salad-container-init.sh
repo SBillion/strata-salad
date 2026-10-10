@@ -113,7 +113,16 @@ if [ "${REINSTALL:-0}" = "1" ] || [ ! -f "$cfg" ]; then
     --api-key "${API_KEY:-}" --no-start
 fi
 
-if [ -f "$cfg" ]; then
+generated="/opt/strata/strata-$tag.json"
+if [ -f "$generated" ] && [ ! -f "$cfg" ]; then
+  cp -f "$generated" "$cfg"
+fi
+if [ ! -f "$cfg" ]; then
+  echo "[salad-init] FATAL: setup did not create $cfg or $generated" >&2
+  exit 1
+fi
+
+if [ -n "$CONVERSATION_CACHE_MIB" ]; then
   .venv/bin/python - "$cfg" "$CONVERSATION_CACHE_MIB" <<'PY'
 import json, sys
 p, n = sys.argv[1], str(sys.argv[2])
@@ -125,7 +134,7 @@ if "--conversation-cache-mib" not in a:
     print("[salad-init] conversation-cache-mib =", n)
 PY
 fi
-ln -sfn "$cfg" "/opt/strata/strata-$tag.json" 2>/dev/null || true
+ln -sfn "$cfg" "$generated" 2>/dev/null || true
 
 echo "[salad-init] démarrage du serveur (avec cache de conversation)"
 exec .venv/bin/python setup.py --port "$PORT"
