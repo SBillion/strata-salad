@@ -455,7 +455,12 @@ build_body() {
 # PATCH (ContainerGroupPatch) n'accepte ni name ni autostart_policy ni
 # restart_policy : on les retire du body complet.
 build_patch_body() {
-  build_body | jq -c 'del(.name, .autostart_policy, .restart_policy)'
+  build_body | jq -c \
+    --argjson startup "$STARTUP_PROBE" \
+    --argjson liveness "$LIVENESS_PROBE" \
+    'del(.name, .autostart_policy, .restart_policy)
+     | if $startup == 0 then .startup_probe = null else . end
+     | if $liveness == 0 then .liveness_probe = null else . end'
 }
 
 # ---------------------------------------------------------------------------
