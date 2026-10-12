@@ -126,6 +126,7 @@ téléchargement du modèle → serveur.
 | `SALAD_NET_AUTH` | `true` | auth par clé API Salad sur la gateway |
 | `STRATA_API_KEY` | (généré) | clé du serveur Strata (injectée aussi comme `STRATA_API_KEY`) |
 | `STRATA_ALLOWED_HOSTS` | `auto` | `auto` = gateway de **ce** group ; csv ; `.exemple.com` ; `*` |
+| `SALAD_FIT_MAX_TOKENS` | (off) | `1` = réduit `max_tokens` à la place restante au lieu de rejeter les requêtes trop longues |
 
 Un 3090 (24 Go de VRAM) tient Q2_0 et IQ2_XS ; les tailles IQ3 demandent plus de RAM/VRAM.
 Toutes les variables sont listées en tête de `salad.sh`.
@@ -177,6 +178,9 @@ décodage plus rapide**, et ça rend les modèles plus lourds supportables.
 8. **`--parallel`** reste à 1 par défaut : sur 24 Go, 2 requêtes simultanées ralentissent chacune.
 9. **`SALAD_CONVERSATION_CACHE_MIB=8192`** : cache de conversation multi-tours (relances de projets
    longs sans re-lire ~90 % du prompt). Écrit dans la config au setup.
+10. **Conversation qui sature le contexte ?** `SALAD_FIT_MAX_TOKENS=1` : le serveur réduit
+    `max_tokens` à la place restante au lieu de renvoyer l'erreur `prompt + max_tokens exceeds
+    context`. Écrit dans la config au setup, réappliqué à chaque démarrage (disque éphémère).
 
 Exemple « qualité max » :
 ```sh

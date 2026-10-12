@@ -84,7 +84,7 @@ echo "[salad-init]       EPHEMERE sur Salad : refait à chaque nouvelle instance
 echo "[salad-init] ------------------------------------------------------------"
 
 # --- Chemin normal : on laisse l'entrypoint officiel faire setup + serve ----
-if [ -z "${CONVERSATION_CACHE_MIB:-}" ]; then
+if [ -z "${CONVERSATION_CACHE_MIB:-}" ] && [ -z "${FIT_MAX_TOKENS:-}" ]; then
   if [ -f /opt/strata/docker-entrypoint.sh ]; then
     exec /opt/strata/docker-entrypoint.sh
   fi
@@ -92,10 +92,11 @@ if [ -z "${CONVERSATION_CACHE_MIB:-}" ]; then
   exit 1
 fi
 
-# --- Cache de conversation (optionnel) --------------------------------------
-# setup.py n'expose pas --conversation-cache-mib : il faut l'écrire dans la
-# config générée. On refait donc setup nous-mêmes (--no-start), on patche la
-# config, puis on démarre. Utile pour les prompts longs multi-tours.
+# --- Options écrites dans la config (cache de conversation, fit_max_tokens) --
+# setup.py n'expose pas --conversation-cache-mib ni fit_max_tokens : il faut les
+# écrire dans la config générée. On refait donc setup nous-mêmes (--no-start),
+# on patche la config, puis on démarre. Indispensable sur un disque éphémère :
+# ces réglages sont réappliqués à CHAQUE démarrage (pas d'édition manuelle).
 prefix=""
 [ "$FAMILY" != "qwen" ] && prefix="$FAMILY-"
 tag="${prefix}$(printf '%s' "$MODEL" | tr 'A-Z' 'a-z')"
@@ -133,7 +134,24 @@ if "--conversation-cache-mib" not in a:
     print("[salad-init] conversation-cache-mib =", n)
 PY
 fi
+
+# fit_max_tokens : le serveur réduit max_tokens à la place restante au lieu de
+# rejeter une requête dont prompt+max_tokens dépasse le contexte (#545).
+case "${FIT_MAX_TOKENS:-}" in
+  1|true|yes|on)
+    .venv/bin/python - "$cfg" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+if d.get("fit_max_tokens") is not True:
+    d["fit_max_tokens"] = True
+    json.dump(d, open(p, "w"))
+    print("[salad-init] fit_max_tokens = true")
+PY
+    ;;
+esac
+
 ln -sfn "$cfg" "$generated" 2>/dev/null || true
 
-echo "[salad-init] démarrage du serveur (avec cache de conversation)"
+echo "[salad-init] démarrage du serveur (config patchée)"
 exec .venv/bin/python setup.py --port "$PORT"

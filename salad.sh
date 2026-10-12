@@ -56,6 +56,9 @@
 #   SALAD_HF_ENDPOINT    (opt)     miroir HuggingFace (ex: https://hf-mirror.com)
 #   SALAD_STRATA_SOURCE  (opt)     huggingface | modelscope
 #   SALAD_CONVERSATION_CACHE_MIB (opt) cache de conversation multi-tours (ex: 8192)
+#   SALAD_FIT_MAX_TOKENS (opt)     1 = réduire max_tokens à la place restante au
+#                                  lieu de rejeter les requêtes trop longues
+#                                  (fit_max_tokens=true dans strata-<model>.json)
 #   SALAD_RUNTIME_BUILD  (opt)     1 = installer/builder Strata AU DÉMARRAGE du
 #                                  container (image générique, aucun registry)
 #   SALAD_RUNTIME_IMAGE  (opt)     Image de base pour le runtime build
@@ -143,6 +146,14 @@ RUNTIME_BUILD="${SALAD_RUNTIME_BUILD:-0}"
 # Chemin des données Strata DANS le container. Vide = on laisse l'image décider
 # (/data).
 DATA_DIR="${SALAD_DATA_DIR:-}"
+
+# fit_max_tokens : 1 = le serveur réduit max_tokens à la place restante au lieu
+# de rejeter une requête dont prompt+max_tokens dépasse le contexte. Écrit dans
+# strata-<model>.json au setup (container-init).
+case "${SALAD_FIT_MAX_TOKENS:-}" in
+  1|true|yes|on) FIT_MAX_TOKENS=1 ;;
+  *)             FIT_MAX_TOKENS="" ;;
+esac
 
 if [ "$RUNTIME_BUILD" = "1" ]; then
   INIT_SCRIPT="$REPO_DIR/salad-runtime-init.sh"
@@ -285,6 +296,7 @@ build_environment() {
     --arg hf_endpoint "${SALAD_HF_ENDPOINT:-}" \
     --arg source "${SALAD_STRATA_SOURCE:-}" \
     --arg conv_cache "${SALAD_CONVERSATION_CACHE_MIB:-}" \
+    --arg fit_max "$FIT_MAX_TOKENS" \
     '{
       FAMILY: $family,
       MODEL: $model,
@@ -301,7 +313,8 @@ build_environment() {
     + (if $allowed_hosts != "" then {STRATA_ALLOWED_HOSTS: $allowed_hosts} else {} end)
     + (if $hf_endpoint   != "" then {HF_ENDPOINT: $hf_endpoint}            else {} end)
     + (if $source        != "" then {STRATA_SOURCE: $source}               else {} end)
-    + (if $conv_cache    != "" then {CONVERSATION_CACHE_MIB: $conv_cache}  else {} end)'
+    + (if $conv_cache    != "" then {CONVERSATION_CACHE_MIB: $conv_cache}  else {} end)
+    + (if $fit_max       != "" then {FIT_MAX_TOKENS: $fit_max}             else {} end)'
 }
 
 build_container() {

@@ -125,6 +125,7 @@ model download → server.
 | `SALAD_NET_AUTH` | `true` | auth via Salad API key on the gateway |
 | `STRATA_API_KEY` | (generated) | Strata server key (also injected as `STRATA_API_KEY`) |
 | `STRATA_ALLOWED_HOSTS` | `auto` | `auto` = **this** group's gateway; csv; `.example.com`; `*` |
+| `SALAD_FIT_MAX_TOKENS` | (off) | `1` = shrink `max_tokens` to the room left instead of rejecting long requests |
 
 A 3090 (24 GB VRAM) handles Q2_0 and IQ2_XS; IQ3 sizes need more RAM/VRAM.
 All variables are listed at the top of `salad.sh`.
@@ -176,6 +177,9 @@ decoding**, and it makes heavier models bearable.
 8. **`--parallel`** stays at 1 by default: on 24 GB, 2 simultaneous requests each slow down.
 9. **`SALAD_CONVERSATION_CACHE_MIB=8192`**: multi-turn conversation cache (restarting long
    projects without re-reading ~90 % of the prompt). Written into the config at setup.
+10. **Long conversation hitting the context?** `SALAD_FIT_MAX_TOKENS=1`: the server shrinks
+    `max_tokens` to the room left instead of returning the `prompt + max_tokens exceeds context`
+    error. Written into the config at setup, reapplied on every start (ephemeral disk).
 
 Example "max quality":
 ```sh

@@ -111,6 +111,30 @@ log "setup.py va installer l'engine (pré-compilé) et télécharger le modèle 
   --api-key "${API_KEY:-}" \
   --no-start
 
+# --- 5b. fit_max_tokens (optionnel) -----------------------------------------
+# Le serveur réduit max_tokens à la place restante au lieu de rejeter une
+# requête dont prompt+max_tokens dépasse le contexte (#545). setup.py n'expose
+# pas ce réglage : on l'écrit dans la config générée.
+case "${FIT_MAX_TOKENS:-}" in
+  1|true|yes|on)
+    prefix=""
+    [ "$FAMILY" != "qwen" ] && prefix="$FAMILY-"
+    tag="${prefix}$(printf '%s' "$MODEL" | tr 'A-Z' 'a-z')"
+    cfg="$STRATA_HOME/strata-$tag.json"
+    if [ -f "$cfg" ]; then
+      .venv/bin/python - "$cfg" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+if d.get("fit_max_tokens") is not True:
+    d["fit_max_tokens"] = True
+    json.dump(d, open(p, "w"))
+    print("[salad-runtime] fit_max_tokens = true")
+PY
+    fi
+    ;;
+esac
+
 # --- 6. Serveur -------------------------------------------------------------
 log "démarrage du serveur sur $HOST:$PORT"
 exec .venv/bin/python setup.py --port "$PORT"
