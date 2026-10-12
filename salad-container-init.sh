@@ -39,11 +39,10 @@ export STRATA_EXECV="${STRATA_EXECV:-1}" # le serveur devient PID 1 (SIGTERM)
 export STRATA_ALLOWED_HOSTS="${STRATA_ALLOWED_HOSTS:-.salad.cloud}"
 
 # --- Clé API du serveur Strata ----------------------------------------------
-# Attention : le serveur lit STRATA_API_KEY, l'entrypoint/ setup.py lit API_KEY.
-# Une image bakée a un strata-<model>.json avec "api_key": "" (setup fait au
-# build sans clé) et l'entrypoint ne relance PAS setup au démarrage : sans
-# injection, la clé fournie par salad.sh est ignorée. On propage donc API_KEY
-# vers STRATA_API_KEY (sans jamais l'exporter vide : le serveur sortirait).
+# Attention : le serveur Strata lit STRATA_API_KEY ; setup.py ne lit que
+# API_KEY. On propage API_KEY -> STRATA_API_KEY pour que la clé posée par
+# salad.sh soit bien utilisée par le serveur (sans jamais l'exporter vide :
+# le serveur sortirait).
 if [ -z "${STRATA_API_KEY:-}" ] && [ -n "${API_KEY:-}" ]; then
   export STRATA_API_KEY="$API_KEY"
 fi

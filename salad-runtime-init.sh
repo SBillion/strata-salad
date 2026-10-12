@@ -15,7 +15,7 @@
 # ATTENTION : le disque Salad est ÉPHÉMÈRE. Toute l'installation et le
 # téléchargement du modèle sont refaits à CHAQUE nouvelle instance (et une
 # instance peut être réallouée). Bien pour tester ; pour la prod, préférer
-# l'image bakée (Dockerfile.baked) ou l'image pré-construite par la CI.
+# l'image pré-construite par la CI (.github/workflows/build.yml).
 # ---------------------------------------------------------------------------
 
 set -e

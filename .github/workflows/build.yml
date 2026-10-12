@@ -2,51 +2,23 @@ name: build-strata-image
 
 # Build the Strata engine image on an x86_64 runner and push it to GHCR.
 #
-# - Without `bake`: the image is small; the ~70 GB model is downloaded at
-#   container start (needs Salad's ephemeral disk each instance).
-# - With `bake=true`: the model is downloaded INTO the image at build time.
-#   This needs a runner with a lot of disk (>= ~200 GB). GitHub-hosted runners
-#   do NOT have enough; pass a self-hosted / larger-runner label in `runner`.
+# The model is NOT baked into the image: baked images (tens-of-GB single
+# layers) failed to start on SaladCloud ("Instance Start Failure: Other").
+# The ~70 GB model is downloaded at container start on Salad's ephemeral
+# disk instead (see README).
 
 on:
   workflow_dispatch:
     inputs:
-      bake:
-        description: "Bake the model into the image (needs a large-disk runner)"
-        type: boolean
-        default: false
-      keep_gguf:
-        description: "Keep raw GGUF in the baked image (false = smaller, needs LOW_RAM=on)"
-        type: boolean
-        default: true
       runner:
-        description: "Runner label (use a self-hosted/larger runner for bake)"
+        description: "Runner label"
         type: string
         default: ubuntu-latest
-      family:
-        description: "Strata family"
-        type: choice
-        options: [qwen, swift, coder, unsloth]
-        default: qwen
       model:
-        description: "Strata model size"
+        description: "Strata model size (image tag; the model itself is chosen at deploy time)"
         type: choice
         options: [IQ2_XS, Q2_0, IQ3_XXS, IQ3_S]
         default: IQ2_XS
-      context:
-        description: "Context window"
-        type: string
-        default: "32768"
-      vision:
-        description: "Image input"
-        type: choice
-        options: ["no", "cpu", "yes"]
-        default: "no"
-      low_ram:
-        description: "LOW_RAM: on = experts from the pack (fits 60GB RAM); off = resident (no pack, faster, needs more RAM)"
-        type: choice
-        options: ["on", "off", "auto"]
-        default: "on"
       cuda_arch:
         description: "CUDA arch (86 = RTX 3090)"
         type: string
@@ -71,32 +43,10 @@ concurrency:
 jobs:
   build:
     runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
-    timeout-minutes: 350
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Free disk space (bake only)
-        if: ${{ inputs.bake == true }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
-          docker image prune -af || true
-          df -h /
-
-      - name: Disk space preflight
-        shell: bash
-        run: |
-          set -euo pipefail
-          avail_kb=$(df -Pk / | awk 'NR==2{print $4}')
-          avail_gb=$((avail_kb / 1048576))
-          echo "Free disk on /: ${avail_gb} GB"
-          if [ "${{ inputs.bake || 'false' }}" = "true" ] && [ "$avail_gb" -lt 90 ]; then
-            echo "::error::bake=true needs >=90 GB free (have ${avail_gb} GB). Hosted runners top out ~110 GB (measured); a low-RAM bake (pack + model ~104 GB) does NOT fit — use low_ram=off, or a self-hosted/larger runner via the 'runner' input."
-            exit 1
-          fi
 
       - name: Clone Strata source
         shell: bash
@@ -107,43 +57,18 @@ jobs:
 
       - name: Resolve image name
         shell: bash
-        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >>"$GITHUB_ENV"
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:${{ inputs.model || 'IQ2_XS' }}" >>"$GITHUB_ENV"
 
-      - name: Build base engine image (x86_64)
+      - name: Build engine image (x86_64)
         shell: bash
         run: |
           set -euo pipefail
           docker build \
             --platform linux/amd64 \
-            -t "${IMAGE}-base:${{ inputs.model || 'IQ2_XS' }}" \
+            -t "$IMAGE" \
             --build-arg "CUDA_ARCHITECTURES=${{ inputs.cuda_arch || '86' }}" \
             --build-arg "BUILD_VISION=1" \
             -f .strata/Dockerfile .strata
-
-      - name: Bake model into image
-        if: ${{ inputs.bake == true }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker builder prune -af || true
-          docker build \
-            --platform linux/amd64 \
-            -t "${IMAGE}:${{ inputs.model }}-baked" \
-            --build-arg "BASE_IMAGE=${IMAGE}-base:${{ inputs.model }}" \
-            --build-arg "STRATA_FAMILY=${{ inputs.family || 'qwen' }}" \
-            --build-arg "STRATA_MODEL=${{ inputs.model || 'IQ2_XS' }}" \
-            --build-arg "STRATA_CONTEXT=${{ inputs.context || '32768' }}" \
-            --build-arg "STRATA_VISION=${{ inputs.vision || 'no' }}" \
-            --build-arg "STRATA_LOW_RAM=${{ inputs.low_ram || 'on' }}" \
-            --build-arg "STRATA_KEEP_GGUF=${{ inputs.keep_gguf == false && '0' || '1' }}" \
-            -f Dockerfile.baked .
-
-      - name: Tag non-baked image
-        if: ${{ inputs.bake != true }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker tag "${IMAGE}-base:${{ inputs.model || 'IQ2_XS' }}" "${IMAGE}:${{ inputs.model || 'IQ2_XS' }}"
 
       - name: Log in to GHCR
         if: ${{ inputs.push != false }}
@@ -158,8 +83,4 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ inputs.bake }}" = "true" ]; then
-            docker push "${IMAGE}:${{ inputs.model }}-baked"
-          else
-            docker push "${IMAGE}:${{ inputs.model }}"
-          fi
+          docker push "$IMAGE"

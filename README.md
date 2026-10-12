@@ -1,288 +1,222 @@
 # strata-salad
 
+[English](README.md) | [Français](README.fr.md)
+
 Deploy [Strata](https://github.com/Niko1221/Strata) (Qwen3.8-Flash-Next, OpenAI/Anthropic-compatible API) on
 [SaladCloud](https://salad.com) RTX 3090 container groups.
 
-This repo packages three things:
+This repo packages four things:
 
-| File | Rôle |
+| File | Role |
 | --- | --- |
-| `salad.sh` | CLI REST SaladCloud : build/push, deploy/update/start/stop/status/logs/recreate/delete, et `bake` (B′). |
-| `salad-container-init.sh` | Commande du container (Salad écrase l'`ENTRYPOINT`) : defaults, `socat` IPv6→IPv4, `exec` l'entrypoint Strata. |
-| `salad-runtime-init.sh` | Variante « install au démarrage » depuis une image générique (aucun registry). |
-| `salad-bake-portal.sh` | **B″ (recommandé)** : à lancer dans le terminal Portail d'une instance prête → bake + push via crane. |
-| `salad-bake-init.sh` | Commande du group de bake piloté par l'API (B′, expérimental). |
-| `Dockerfile.baked` | Variante « modèle baké » (multi-stage, socat inclus) pour un builder Docker avec GPU. |
-| `.github/workflows/build.yml` | Build de l'image engine sur runner **x86_64** + push GHCR (ne bake pas : pas de GPU). |
+| `salad.sh` | SaladCloud REST CLI: build/push, deploy/update/start/stop/status/logs/recreate/delete |
+| `salad-container-init.sh` | Container command (Salad overrides the `ENTRYPOINT`): defaults, IPv6→IPv4 `socat` relay, `exec` Strata's entrypoint |
+| `salad-runtime-init.sh` | "Install at startup" variant from a generic image (no registry) |
+| `.github/workflows/build.yml` | Engine image build on an **x86_64** runner + push to GHCR |
 
-## Pourquoi une image bakée ?
+## How it works
 
-Le disque des instances SaladCloud est **éphémère** : sans bake, les ~40–70 Go du modèle sont
-re-téléchargés à chaque nouvelle instance, et une instance peut être réallouée à tout moment.
-L'image bakée embarque le modèle déjà préparé (pack d'experts + couche MTP comprises) ; le premier
-démarrage ne fait que charger le modèle et servir.
+The deployed image contains **only the Strata engine** (compiled for x86_64, CUDA arch 86). The model
+(~40–70 GB) is **downloaded at container start**, into the instance's ephemeral disk.
 
-> ⚠️ L'image bakée pèse plusieurs dizaines de Go dans **une seule couche**. Les registries avec une
-> limite par couche (Docker Hub, GHCR ≈ 10 Go) peuvent refuser le push. Utilisez un registry qui
-> accepte les grosses couches (AWS ECR, Azure ACR, Artifact Registry) ou un petit modèle (Q2_0).
+`image_caching: true` (set by `salad.sh`) keeps the engine image cached on a node: subsequent
+instances **on that node** don't re-pull the image; a reallocation to a **new** node re-downloads it.
 
-### Où builder / où pousser (baked)
+> **No "baked" image (model embedded in the image): tried and abandoned.** The baked image
+> (~100 GB in a single layer) systematically fails to start on SaladCloud
+> (`Instance Start Failure: Other`), even with 250 GB of disk and an instance recreate; the
+> non-baked image starts fine with the same configuration. All bake code
+> (`Dockerfile.baked`, API bake B′, portal-terminal bake B″) has been removed from this repo.
 
-Deux contraintes :
-
-0. **Un GPU NVIDIA doit être visible au build.** `setup.py --setup` fait un check matériel au step 1
-   (`nvidia-smi`) et refuse sans GPU. Conséquence : le bake ne peut **pas** se faire sur un runner
-   GitHub hébergé (ni large — indisponible pour un repo perso). Il faut un builder **avec GPU** :
-   container Salad RTX 3090 (le GPU est visible → `setup.py` passe), VM GPU cloud avec Docker, ou ta
-   machine avec un driver NVIDIA.
-1. **Builder sur x86_64** (l'engine compile du code CPU natif) avec **~250 Go de disque libre**
-   (modèle ~68 Go + pack ~36 Go + MTP + couches Docker). Options : VM cloud x86_64 CPU-only,
-   runner GitHub self-hosted / larger-runner (le runner hébergé standard n'a pas le disque et le
-   build+push peut dépasser les 6 h), ou ta machine x86_64.
-2. **Pousser vers un registry sans limite de couche** (self-hosted `registry:2`, AWS ECR, Azure
-   ACR, Artifact Registry) : la donnée du modèle est une couche unique de plusieurs dizaines de Go.
-
-```sh
-# machine x86_64, ~250 Go libres
-export SALAD_IMAGE=registry.example.com/strata:IQ2_XS-baked
-SALAD_BAKE=1 STRATA_MODEL=IQ2_XS ./salad.sh build   # base engine (arch 86) puis Dockerfile.baked
-./salad.sh push
-
-# image plus légère : jeter les GGUF bruts (LOW_RAM=on lit le pack) — expérimental
-SALAD_BAKE=1 SALAD_KEEP_GGUF=0 STRATA_MODEL=IQ2_XS ./salad.sh build
-
-# déploiement (données déjà dans l'image -> aucun download)
-SALAD_IMAGE=registry.example.com/strata:IQ2_XS-baked ./salad.sh deploy
-```
-
-`image_caching: true` (déjà dans le body) garde les couches en cache sur un nœud : les instances
-suivantes **sur ce nœud** démarrent sans re-pull ; une réalocation sur un **nouveau** nœud re-pull
-l'image entière.
-
-### B″ — bake depuis le terminal Portail d'une instance déjà prête (recommandé)
-
-**C'est la méthode qui a fonctionné.** On réutilise une instance Strata **déjà prête** (son `/data`
-contient déjà modèle + pack + MTP → aucun re-download, aucun nouveau container à placer), et on
-empile `/data` comme couche via `crane` (binaire statique, pas de daemon Docker).
-
-1. Portail Salad → container group → clique l'instance **running** → onglet **Terminal**.
-2. Récupère un token GHCR (`write:packages`) : `gh auth token`, ou un PAT.
-3. Dans le terminal :
-
-```sh
-export REGISTRY_USER=<user>
-export REGISTRY_PASS=<token/PAT write:packages>
-curl -fsSL https://raw.githubusercontent.com/SBillion/strata-salad/main/salad-bake-portal.sh | sh
-```
-
-Le script installe `crane`, se logue sur GHCR, puis `crane append --base <image engine> \
---new_layer <tar de /data streamé> --new_tag <image-baked>` et push. Le tar est **streamé (FIFO)**
-→ pas de double copie disque. Fin attendue : `OK : ghcr.io/<user>/strata-salad:IQ2_XS-baked`.
-
-Ensuite, déployer l'image bakée (données déjà dedans) :
-
-```sh
-SALAD_IMAGE=ghcr.io/<user>/strata-salad:IQ2_XS-baked SALAD_DATA_DIR=/data ./salad.sh deploy
-# puis forcer la bascule de l'instance sur la nouvelle version :
-./salad.sh recreate strata-qwen
-```
-
-> **GHCR a accepté la couche ~100 Go** lors de notre essai → pas besoin d'un registry self-hosted.
-
-### B′ — bake piloté par l'API (`salad.sh bake`)
-
-`./salad.sh bake` crée un container group **GPU dédié** (16 vCPU / 60 Go / 250 Go) qui exécute
-`salad-bake-init.sh` (setup + `crane append` + push) puis on le supprime. **Non abouti lors de nos
-tests** : le group restait `pending` (préparation d'image côté Salad / placement). À réserver à
-l'expérimentation ; préférer **B″** ci-dessus. Flags utiles : `SALAD_TARGET_IMAGE`,
-`SALAD_REGISTRY_USER/PASS`, `SALAD_BAKE_CPU`, `SALAD_BAKE_STORAGE_GB`.
-
-## Commandes
-
-```sh
-./salad.sh list                 # tous les container groups (nom, état, URL)
-./salad.sh deploy [NAME]        # créer/MAJ + démarrer
-./salad.sh update [NAME]        # modifier la config (PATCH, sans démarrer)
-./salad.sh start [NAME]         # démarrer
-./salad.sh stop  [NAME]         # arrêter
-./salad.sh restart [NAME]       # stop puis start
-./salad.sh start-all            # démarrer tous les groups du projet
-./salad.sh stop-all             # arrêter tous les groups du projet
-./salad.sh status [NAME]        # état + URL + instances
-./salad.sh logs   [NAME]        # logs système
-./salad.sh recreate [NAME]      # appliquer la version courante SANS re-pull d'image
-./salad.sh delete [NAME]        # supprimer (irréversible, force un re-pull ensuite)
-```
-
-- `update` (PATCH) reprend par défaut l'image/ressources/modèle **actuels** du group : seuls les
-  champs surchargés changent (via env `SALAD_*`/`STRATA_*`).
-- **Pour appliquer un PATCH sans rebuild/re-pull** : `update` puis `recreate`. L'endpoint Salad
-  `recreate` détruit et relance le container **sur le même nœud**, image en cache → pas de
-  re-téléchargement. Éviter `delete` (lui force un re-pull).
-
-## Prérequis
+## Prerequisites
 
 - `bash`, `curl`, `jq`, `docker`.
-- Un compte SaladCloud + une organisation et un projet (`SALAD_ORG`, `SALAD_PROJECT`).
-- Une image poussée dans un registry lisible par Salad (GHCR/Docker Hub/ECR…).
+- A SaladCloud account + an organization and a project (`SALAD_ORG`, `SALAD_PROJECT`).
+- An image pushed to a registry Salad can read (GHCR/Docker Hub/ECR…).
 
 ## Quickstart
 
-```sh
-export SALAD_API_KEY=...        # clé API SaladCloud
-export SALAD_ORG=mon-org
-export SALAD_PROJECT=mon-projet
-export SALAD_IMAGE=ghcr.io/<user>/strata-salad:IQ2_XS
+1. **Build the engine image** (x86_64 required, see "Building locally"): via GitHub Actions
+   (*Actions → build-strata-image → Run workflow*), or on an x86_64 machine:
 
-./salad.sh gpu-classes           # vérifier l'UUID de la classe « RTX 3090 »
-./salad.sh build                 # construire l'image (NON bakée)
-./salad.sh push
-./salad.sh deploy                # créer/MAJ + démarrer le container group
-./salad.sh status                # état + URL de la gateway
+   ```sh
+   export SALAD_IMAGE=ghcr.io/<user>/strata-salad:IQ2_XS
+   ./salad.sh build && ./salad.sh push
+   ```
+
+2. **Deploy** (startup/liveness probes disabled, see below):
+
+   ```sh
+   export SALAD_API_KEY=...        # SaladCloud API key
+   export SALAD_ORG=my-org
+   export SALAD_PROJECT=my-project
+   export SALAD_IMAGE=ghcr.io/<user>/strata-salad:IQ2_XS
+
+   ./salad.sh gpu-classes          # check the "RTX 3090" class UUID
+   SALAD_STARTUP_PROBE=0 SALAD_LIVENESS_PROBE=0 ./salad.sh deploy
+   ./salad.sh status               # state + gateway URL
+   ```
+
+**Why disable the startup/liveness probes?** The first start downloads ~40–80 GB (~90–110 min at
+~12 MB/s on a common node). A probe's maximum window is **60 minutes**: the `startup_probe` would
+**restart** the container before the download finishes, and the ephemeral disk would lose the
+download (endless loop). The `readiness_probe` alone never kills: it only gates traffic until the
+model is ready.
+
+## Commands
+
+```sh
+./salad.sh list                 # all container groups (name, state, URL)
+./salad.sh deploy [NAME]        # create/update + start
+./salad.sh update [NAME]        # change the config (PATCH, without starting)
+./salad.sh start [NAME]         # start
+./salad.sh stop  [NAME]         # stop
+./salad.sh restart [NAME]       # stop then start
+./salad.sh start-all            # start all groups in the project
+./salad.sh stop-all             # stop all groups in the project
+./salad.sh status [NAME]        # state + URL + instances
+./salad.sh logs   [NAME]        # system logs
+./salad.sh recreate [NAME]      # apply the current version WITHOUT re-pulling the image
+./salad.sh delete [NAME]        # delete (irreversible, forces a re-pull afterwards)
 ```
 
-Image bakée (recommandé sur Salad) :
+- `update` (PATCH) keeps the group's **current** image/resources/model by default: only overridden
+  fields change (via `SALAD_*`/`STRATA_*` env vars).
+- **To apply a PATCH without rebuild/re-pull**: `update` then `recreate`. Salad's `recreate`
+  endpoint destroys and restarts the container **on the same node**, image cached → no
+  re-download. Avoid `delete` (it forces a re-pull).
+
+## Runtime mode (no registry to feed)
+
+Alternative: build/push nothing and let the container install Strata **at startup** from a public
+generic image (`nvidia/cuda:13.0.0-devel-ubuntu24.04`):
 
 ```sh
-SALAD_BAKE=1 STRATA_MODEL=IQ2_XS ./salad.sh build
-./salad.sh push
-./salad.sh deploy
-```
-
-## Mode runtime (aucun registry à alimenter)
-
-Alternative : ne rien builder/pousser, et laisser le container installer Strata **au démarrage**
-depuis une image publique générique (`nvidia/cuda:13.0.0-devel-ubuntu24.04`) :
-
-```sh
-export SALAD_IMAGE=nvidia/cuda:13.0.0-devel-ubuntu24.04   # image publique, pas de push
+export SALAD_IMAGE=nvidia/cuda:13.0.0-devel-ubuntu24.04   # public image, no push
 SALAD_RUNTIME_BUILD=1 ./salad.sh deploy
 ```
 
-`salad-runtime-init.sh` fait alors dans le container : `apt` deps → `git clone` Strata → venv +
-pip → `setup.py --setup --yes` (engine pré-compilé pour RTX 30/40/50, sinon compilation) →
-téléchargement du modèle → serveur.
+`salad-runtime-init.sh` then does, inside the container: `apt` deps → `git clone` Strata → venv +
+pip → `setup.py --setup --yes` (precompiled engine for RTX 30/40/50, otherwise compilation) →
+model download → server.
 
-| | `SALAD_BAKE=1` (bakée) | `SALAD_RUNTIME_BUILD=1` | image CI (non bakée) |
-| --- | --- | --- | --- |
-| Build x86_64 requis | oui | non | oui |
-| Registry à alimenter | oui (gros) | non | oui (petit) |
-| Modèle au 1er démarrage | déjà dedans | re-téléchargé | re-téléchargé |
-| Coût par nouvelle instance | faible (pull image) | élevé (apt+pip+engine+70 Go) | élevé (70 Go) |
+| | CI image (recommended) | `SALAD_RUNTIME_BUILD=1` |
+| --- | --- | --- |
+| x86_64 build required | yes (once, in CI) | no |
+| Registry to feed | yes (small: engine only) | no |
+| Cost per new instance | model download | apt+pip+engine+model download |
 
-> Le disque Salad est **éphémère** : en mode runtime, tout est refait à chaque nouvelle instance.
-> À réserver au test.
+> Salad's disk is **ephemeral**: in runtime mode, everything is redone on every new instance.
+> Reserve this for testing.
 
-## Modèle et ressources (défauts RTX 3090)
+## Model and resources (RTX 3090 defaults)
 
-| Réglage | Défaut | Note |
+| Setting | Default | Note |
 | --- | --- | --- |
 | `STRATA_FAMILY` | `qwen` | `qwen` \| `swift` \| `coder` \| `unsloth` |
 | `STRATA_MODEL` | `IQ2_XS` | `IQ2_XS` \| `Q2_0` \| `IQ3_XXS` \| `IQ3_S` |
 | `STRATA_CONTEXT` | `32768` | |
 | `STRATA_VISION` | `no` | `no` \| `cpu` \| `yes` |
-| `STRATA_LOW_RAM` | `on` | voir « Pourquoi LOW_RAM=on » ci-dessous |
-| `SALAD_CPU` | `8` | vCPU ; **max 16** — mettre **16** est le levier le plus utile en low-RAM |
-| `SALAD_MEMORY_MB` | `61440` | 60 Go ; **max ~61440 Mo** côté API |
-| `SALAD_STORAGE_GB` | `120` | disque éphémère |
+| `STRATA_LOW_RAM` | `on` | see "Why LOW_RAM=on" below |
+| `SALAD_CPU` | `8` | vCPU; **max 16** — setting **16** is the most useful lever in low-RAM |
+| `SALAD_MEMORY_MB` | `61440` | 60 GB; **max ~61440 MB** on the API side |
+| `SALAD_STORAGE_GB` | `120` | ephemeral disk |
 | `SALAD_PRIORITY` | `high` | `high` \| `medium` \| `low` \| `batch` |
-| `SALAD_NET_AUTH` | `true` | auth par clé API Salad sur la gateway |
-| `STRATA_API_KEY` | (généré) | clé du serveur Strata (injectée aussi comme `STRATA_API_KEY`) |
-| `STRATA_ALLOWED_HOSTS` | `auto` | `auto` = gateway de **ce** group ; csv ; `.exemple.com` ; `*` |
+| `SALAD_NET_AUTH` | `true` | auth via Salad API key on the gateway |
+| `STRATA_API_KEY` | (generated) | Strata server key (also injected as `STRATA_API_KEY`) |
+| `STRATA_ALLOWED_HOSTS` | `auto` | `auto` = **this** group's gateway; csv; `.example.com`; `*` |
 
-Un 3090 (24 Go de VRAM) tient Q2_0 et IQ2_XS ; les tailles IQ3 demandent plus de RAM/VRAM.
-Toutes les variables sont listées en tête de `salad.sh`.
+A 3090 (24 GB VRAM) handles Q2_0 and IQ2_XS; IQ3 sizes need more RAM/VRAM.
+All variables are listed at the top of `salad.sh`.
 
-### Pourquoi LOW_RAM=on ?
+### Why LOW_RAM=on ?
 
-`setup.py` lit la RAM disponible dans **`/proc/meminfo`, soit la RAM du nœud entier**, pas la limite
-du container (Salad plafonne l'instance à ~60 Go). Sans `LOW_RAM`, setup croit disposer de 64-128 Go
-et prévoit de charger 39-48 Go d'experts **en RAM** (+ verrouillage pour le GPU) : sous le plafond du
-container, ça part en OOM/thrash. `LOW_RAM=on` fait lire les experts depuis le **pack sur disque**
-(`experts.bin`) au lieu de tout garder résident → empreinte RAM faible, tient dans le plafond.
+`setup.py` reads available RAM from **`/proc/meminfo`, i.e. the whole node's RAM**, not the
+container's limit (Salad caps the instance at ~60 GB). Without `LOW_RAM`, setup believes it has
+64-128 GB and plans to load 39-48 GB of experts **in RAM** (+ locking for the GPU): under the
+container's cap, this goes OOM/thrash. `LOW_RAM=on` makes experts read from the **on-disk pack**
+(`experts.bin`) instead of staying resident → small RAM footprint, fits under the cap.
 
-Conséquence : le décodage est un peu plus lent (lectures disque), mais avec 24 Go de VRAM le cache
-d'experts GPU absorbe le plus chaud. **Plus de vCPU (jusqu'à 16) accélère la part CPU** du chemin
-low-RAM. Si ton organisation permettait >60 Go de RAM, on pourrait passer `LOW_RAM=off` (experts
-résidents → plus rapide) ; au plafond documenté de 60 Go, garde `on`.
+Consequence: decoding is a bit slower (disk reads), but with 24 GB VRAM the GPU expert cache
+absorbs the hottest ones. **More vCPU (up to 16) speeds up the CPU part** of the low-RAM path. If
+your organization allowed >60 GB of RAM, you could switch to `LOW_RAM=off` (resident experts →
+faster); at the documented 60 GB cap, keep `on`.
 
-## Optimisation
+## Optimization
 
-### Quel modèle pour un RTX 3090 (24 Go VRAM, 60 Go RAM, 16 vCPU) ?
+### Which model for an RTX 3090 (24 GB VRAM, 60 GB RAM, 16 vCPU) ?
 
-En low-RAM, c'est le **CPU** qui calcule les experts que le GPU ne garde pas. Donc **plus de vCPU =
-décodage plus rapide**, et ça rend les modèles plus lourds supportables.
+In low-RAM, the **CPU** computes the experts the GPU doesn't keep. So **more vCPU = faster
+decoding**, and it makes heavier models bearable.
 
-| Modèle | Télécharg. | RAM | Aire experts | Qualité / vitesse |
+| Model | Download | RAM | Expert area | Quality / speed |
 | --- | --- | --- | --- | --- |
-| `Q2_0` | 66 Go | 48 Go | 34 Go | le plus rapide |
-| `IQ2_XS` | 68 Go | 48 Go | 35.5 Go | recommandé (équilibre) |
-| `IQ3_XXS` | 76 Go | 60 Go | 43 Go | **meilleure qualité** tenant dans 60 Go, plus lent |
-| `IQ3_S` | 84 Go | **62 Go** | 50 Go | meilleure qualité mais **dépasse 60 Go** → à éviter |
-| `coder` (IQ1_M) | 58 Go | 32 Go | 23 Go | pour coder, plus rapide ; plus faible hors code |
+| `Q2_0` | 66 GB | 48 GB | 34 GB | fastest |
+| `IQ2_XS` | 68 GB | 48 GB | 35.5 GB | recommended (balance) |
+| `IQ3_XXS` | 76 GB | 60 GB | 43 GB | **best quality** fitting in 60 GB, slower |
+| `IQ3_S` | 84 GB | **62 GB** | 50 GB | best quality but **exceeds 60 GB** → avoid |
+| `coder` (IQ1_M) | 58 GB | 32 GB | 23 GB | for code, faster; weaker outside code |
 
-- **Meilleur modèle réaliste ici : `IQ3_XXS`** (RAM pile au plafond de 60 Go → tendu ; à tester). Sinon
-  garder `IQ2_XS`.
-- **`IQ3_S` non viable** au plafond 60 Go.
-- **Agent de code** : `STRATA_FAMILY=coder` (IQ1_M), rapide et léger, mais plus faible en général.
+- **Best realistic model here: `IQ3_XXS`** (RAM exactly at the 60 GB cap → tight; test it).
+  Otherwise keep `IQ2_XS`.
+- **`IQ3_S` not viable** at the 60 GB cap.
+- **Code agent**: `STRATA_FAMILY=coder` (IQ1_M), fast and light, but weaker in general.
 
-### Leviers d'optimisation (dans l'ordre)
+### Optimization levers (in order)
 
-1. **`SALAD_CPU=16`** : la part CPU du low-RAM en profite directement (gratuit, max API).
-2. **`SALAD_MEMORY_MB=61440`** (déjà max) : plus d'experts résidents = moins de lectures disque.
-3. **RAM > 60 Go ?** si ton org l'autorise : `STRATA_LOW_RAM=off` → experts résidents, **le plus
-   rapide** (mais ~50 Go de RAM résidents).
-4. **Contexte** : baisser `STRATA_CONTEXT` (ex. `16384`/`8192`) réduit le KV → plus de place pour le
-   cache d'experts GPU → plus rapide. Garder `32768` si les agents ont besoin d'un grand contexte.
-5. **`STRATA_KV=k8v4`** (INT8 K, 4-bit V) : KV plus petit en VRAM → plus d'experts sur le GPU.
-6. **Image bakée** : supprime le cold start (pas de download/pack).
-7. **`SALAD_PRIORITY=high`** : nœuds plus fiables/moins interrompus (coûte plus cher).
-8. Après un PATCH, la nouvelle version ne bascule pas toute seule : **`./salad.sh recreate`**.
-9. **`--parallel`** reste à 1 par défaut : sur 24 Go, 2 requêtes simultanées ralentissent chacune.
-10. **`SALAD_CONVERSATION_CACHE_MIB=8192`** : cache de conversation multi-tours (relances de projets
-    longs sans re-lire ~90 % du prompt). Écrit dans la config au setup.
+1. **`SALAD_CPU=16`**: the CPU part of low-RAM benefits directly (free, API max).
+2. **`SALAD_MEMORY_MB=61440`** (already max): more resident experts = fewer disk reads.
+3. **RAM > 60 GB?** if your org allows it: `STRATA_LOW_RAM=off` → resident experts, **the
+   fastest** (but ~50 GB resident RAM).
+4. **Context**: lowering `STRATA_CONTEXT` (e.g. `16384`/`8192`) shrinks the KV → more room for the
+   GPU expert cache → faster. Keep `32768` if agents need a large context.
+5. **`STRATA_KV=k8v4`** (INT8 K, 4-bit V): smaller KV in VRAM → more experts on the GPU.
+6. **`SALAD_PRIORITY=high`**: more reliable/less interrupted nodes (costs more).
+7. After a PATCH, the new version doesn't switch over by itself: **`./salad.sh recreate`**.
+8. **`--parallel`** stays at 1 by default: on 24 GB, 2 simultaneous requests each slow down.
+9. **`SALAD_CONVERSATION_CACHE_MIB=8192`**: multi-turn conversation cache (restarting long
+   projects without re-reading ~90 % of the prompt). Written into the config at setup.
 
-Exemple « qualité max » :
+Example "max quality":
 ```sh
 SALAD_CPU=16 STRATA_MODEL=IQ3_XXS STRATA_CONTEXT=32768 STRATA_KV=k8v4 \
 SALAD_STARTUP_PROBE=0 SALAD_LIVENESS_PROBE=0 ./salad.sh deploy
 ```
 
-## Accès à l'API (gateway Salad + serveur Strata)
+## API access (Salad gateway + Strata server)
 
-Deux couches d'authentification **indépendantes**, chacune avec sa clé :
+Two **independent** authentication layers, each with its own key:
 
-| Couche | En-tête HTTP | Clé |
+| Layer | HTTP header | Key |
 | --- | --- | --- |
-| Gateway Salad (`SALAD_NET_AUTH=true`) | `Salad-Api-Key` | **clé API SaladCloud** (`SALAD_API_KEY`, portail) |
-| Serveur Strata (`api_key`) | `Authorization: Bearer` (champ `apiKey` du client) | **clé Strata** générée par `salad.sh` |
+| Salad gateway (`SALAD_NET_AUTH=true`) | `Salad-Api-Key` | **SaladCloud API key** (`SALAD_API_KEY`, portal) |
+| Strata server (`api_key`) | `Authorization: Bearer` (client's `apiKey` field) | **Strata key** generated by `salad.sh` |
 
-Détail qui piège : au démarrage, l'entrypoint de Strata lit **`STRATA_API_KEY`** (pas `API_KEY`) et ne
-relance **pas** `setup.py` si la config existe déjà. Une **image bakée** porte donc un
-`strata-<model>.json` avec `"api_key": ""` (le setup du build n'avait pas de clé) : sans injection, la
-clé fournie par `salad.sh` est ignorée et le serveur reste sans auth. Les scripts d'init propagent
-`API_KEY → STRATA_API_KEY` pour couvrir ce cas.
+Gotcha: the Strata server reads **`STRATA_API_KEY`** (not `API_KEY`, which only feeds `setup.py`).
+The init scripts propagate `API_KEY → STRATA_API_KEY` so the key set by `salad.sh` is actually
+used by the server.
 
-### DNS rebinding (403 « Host … is not allowed »)
+### DNS rebinding (403 "Host … is not allowed")
 
-Sans clé serveur, Strata n'accepte que les noms d'hôte connus (protection DNS rebinding). La gateway
-Salad relaie les requêtes avec `Host: <group>.salad.cloud`, un nom inconnu du serveur → **403**. Au
-déploiement, `salad.sh` résout le hostname exact du group (champ API `networking.dns`) et pose
-`STRATA_ALLOWED_HOSTS` avec ce nom. Valeurs acceptées :
+Without a server key, Strata only accepts known host names (DNS rebinding protection). Salad's
+gateway relays requests with `Host: <group>.salad.cloud`, a name unknown to the server → **403**.
+On deploy, `salad.sh` resolves the group's exact hostname (API field `networking.dns`) and sets
+`STRATA_ALLOWED_HOSTS` to it. Accepted values:
 
-- `auto` (défaut) : uniquement la gateway de **ce** container group ;
-- liste séparée par des virgules (`strata.example.com,nas.lan`) ; un préfixe point (`.example.com`)
-  couvre le domaine et ses sous-domaines ;
-- `*` : désactive complètement le contrôle (à éviter).
+- `auto` (default): only **this** container group's gateway;
+- comma-separated list (`strata.example.com,nas.lan`); a dot prefix (`.example.com`) covers the
+  domain and its subdomains;
+- `*`: disables the check entirely (avoid).
 
-Avec une clé Strata (`STRATA_API_KEY`), le contrôle est **de toute façon désactivé** : le serveur fait
-`if svc.api_key or host_allowed(...)`. L'allowlist ne sert donc qu'en mode sans clé serveur.
+With a Strata key (`STRATA_API_KEY`), the check is **disabled anyway**: the server does
+`if svc.api_key or host_allowed(...)`. The allowlist only matters in no-server-key mode.
 
-### Client OpenAI-compatible
+### OpenAI-compatible client
 
-Endpoint : `https://<group>.salad.cloud/v1`, modèle rapporté par `GET /v1/models`
-(ici `qwen3.8-flash-next-iq2_xs`). Exemple OpenCode (`~/.config/opencode/opencode.json`) — sans clé
-serveur, `apiKey` est un dummy et la seule auth est l'en-tête Salad :
+Endpoint: `https://<group>.salad.cloud/v1`, model reported by `GET /v1/models` (the name follows
+`STRATA_MODEL`, e.g. `qwen3.8-flash-next-iq2_xs` or `qwen3.8-flash-next-iq3_xxs`). OpenCode example
+(`~/.config/opencode/opencode.json`) — without a server key, `apiKey` is a dummy and the only auth
+is the Salad header:
 
 ```json
 {
@@ -308,67 +242,52 @@ serveur, `apiKey` est un dummy et la seule auth est l'en-tête Salad :
 }
 ```
 
-Vérifier l'accès :
+Verify access:
 
 ```sh
 curl -H "Salad-Api-Key: $SALAD_API_KEY" "https://<group>.salad.cloud/v1/models"
 ```
 
-> Si le serveur a une clé Strata (`STRATA_API_KEY`), mettez **cette** clé dans `apiKey` (le client
-> l'envoie en `Authorization: Bearer`) et gardez `Salad-Api-Key` pour la gateway.
+> If the server has a Strata key (`STRATA_API_KEY`), put **that** key in `apiKey` (the client sends
+> it as `Authorization: Bearer`) and keep `Salad-Api-Key` for the gateway.
 
 ## CI (GitHub Actions)
 
-`build.yml` construit l'image sur un runner **x86_64** (obligatoire : l'engine Strata compile du
-code CPU natif AVX2/AVX-512) et pousse vers GHCR.
+`build.yml` builds the engine image on an **x86_64** runner (required: the Strata engine compiles
+native CPU code, AVX2/AVX-512) and pushes it to GHCR. Manual trigger: *Actions → build-strata-image
+→ Run workflow* (choose the model, CUDA arch and Strata ref).
 
-- Déclenchement manuel : *Actions → build-strata-image → Run workflow*. Choisir `bake` et le modèle.
-- `bake=true` exige **≥ 180 Go de disque** : les runners GitHub hébergés n'en ont pas assez, passez
-  un label de runner self-hosted via l'input `runner`.
+## Building locally
 
-## Construire en local
+The engine's CPU code is compiled for the machine doing the build. From an ARM Mac, a
+`linux/amd64` build via QEMU will likely produce an image unusable on Salad's nodes:
+`salad.sh build` refuses until `SALAD_ALLOW_QEMU=1` is set. **Build on x86_64.**
 
-Le code CPU de l'engine est compilé pour la machine qui build. Depuis un Mac ARM, un build
-`linux/amd64` via QEMU produira une image probablement inutilisable sur les nœuds Salad :
-`salad.sh build` refuse tant que `SALAD_ALLOW_QEMU=1` n'est pas posé. **Buildez sur x86_64.**
+## Known limitations
 
-## Limitations connues
+- **SaladCloud's gateway/probes communicate over IPv6.** Strata binds `0.0.0.0` (IPv4 only), so
+  without a relay the `readiness_probe` **never** passes: the server runs (logs `ready: …`) but the
+  gateway returns a 503 "SaladCloud" and the instance stays `ready=False`. Both init scripts
+  install and run `socat TCP6-LISTEN:$PORT,ipv6only=1,fork TCP4:127.0.0.1:$PORT` for this.
+  (Alternative: make Strata bind on `::`.)
+- **Max 60 GB RAM** per instance → `LOW_RAM=on` by default.
+- **`ulimit memlock` cannot be set** by Salad (no equivalent of `docker run --ulimit`):
+  `salad-container-init.sh` tries to lift the limit; otherwise expect more page faults at load time.
+- **Ephemeral disk**: the model is re-downloaded on every new instance; any change to the container
+  group recreates the instance (an `update`/PATCH mid-download starts over) — configure everything
+  **before** starting.
+- **Cold start > probe window**: see "Quickstart" (`SALAD_STARTUP_PROBE=0 SALAD_LIVENESS_PROBE=0`).
+- **Update = a "pending" version.** A PATCH creates a new version (`pending_change: true`) but Salad
+  doesn't always replace the instance by itself: it keeps serving the old version. To force the
+  switch **without re-downloading the image**, recreate the instance (`./salad.sh recreate`); this
+  is what was used to apply the `allowed_hosts` fix. `salad.sh update` does not start the group, and
+  a `start` may relaunch the old version while the new one is pending.
+- **DNS rebinding / API keys**: see "API access" above (403 "Host … is not allowed",
+  `STRATA_ALLOWED_HOSTS`, `API_KEY → STRATA_API_KEY` propagation).
+- **`networking` cannot be changed after creation** (except `port`): `auth`, `load_balancer` and the
+  timeouts are fixed at creation, otherwise the group must be recreated.
 
-- **L'image bakée (~100 Go, modèle + pack) ne démarre PAS sur Salad.** Testé : `Instance Start
-  Failure: Other` en boucle, même après avoir porté le disque au max (250 Go) et recréé l'instance.
-  L'image **non bakée** démarre sans problème (même commande, mêmes probes). → **Sur Salad, utiliser
-  l'image non bakée** (le modèle se télécharge au démarrage) ; réserver le bake aux builders Docker
-  avec GPU. Le disque par défaut (120 Go) est de toute façon trop petit pour l'image bakée.
-- **La gateway/probe SaladCloud communique en IPv6.** Strata bind `0.0.0.0` (IPv4 seul), donc sans
-  relais la `readiness_probe` ne passe **jamais** : le serveur tourne (logs `ready: …`) mais la
-  gateway renvoie un 503 « SaladCloud » et l'instance reste `ready=False`. Les deux scripts d'init
-  installent et lancent `socat TCP6-LISTEN:$PORT,ipv6only=1,fork TCP4:127.0.0.1:$PORT` pour ça.
-  (Alternative : faire binder Strata sur `::`.)
-- **RAM max 60 Go** par instance → `LOW_RAM=on` par défaut.
-- **`ulimit memlock` non exposable** par Salad (pas d'équivalent `--ulimit` de `docker run`) :
-  `salad-container-init.sh` tente de lever la limite, sinon plus de page faults au chargement.
-- **Disque éphémère** : voir « image bakée » ci-dessus.
-- **Cold start > fenêtre des probes.** Sur l'image **non bakée**, le 1er démarrage télécharge
-  ~40–80 Go (~90–110 min à ~12 Mo/s sur un nœud commun). La fenêtre max d'un probe est **60 min** :
-  le `startup_probe` ferait alors **redémarrer** le container, et le disque éphémère perdrait le
-  téléchargement (boucle). Déployez donc sans startup ni liveness :
-  `SALAD_STARTUP_PROBE=0 SALAD_LIVENESS_PROBE=0 ./salad.sh deploy` (la `readiness_probe` seule ne
-  tue jamais). Idéalement, utilisez l'**image bakée** : plus de download, fenêtre 60 min largement
-  suffisante.
-- **Toute modification du container group recrée l'instance** : comme le disque est éphémère, un
-  `update`/PATCH en plein téléchargement repart de zéro. Configurez tout **avant** de démarrer.
-- **Mise à jour = version « pending ».** Un PATCH crée une nouvelle version (`pending_change: true`)
-  mais Salad ne remplace pas toujours l'instance toute seule : elle continue de servir l'ancienne
-  version. Pour forcer la bascule **sans re-télécharger l'image**, recréer l'instance
-  (`POST …/containers/<group>/instances/<id>/recreate`) ; c'est ce qui a été utilisé pour appliquer le
-  fix `allowed_hosts`. `salad.sh update` ne démarre pas le group, et un `start` peut relancer
-  l'ancienne version tant que la nouvelle est en attente.
-- **DNS rebinding / clés API** : voir « Accès à l'API » ci-dessus (403 « Host … is not allowed »,
-  `STRATA_ALLOWED_HOSTS`, propagation `API_KEY → STRATA_API_KEY`).
-- **`networking` non modifiable après création** (sauf `port`) : `auth`, `load_balancer` et les
-  timeouts se fixent à la création, sinon il faut recréer le group.
+## Credits
 
-## Crédits
-
-Strata est un projet de [Niko1221](https://github.com/Niko1221/Strata) (MIT). Ce dépôt ne fait que
-l'empaqueter pour SaladCloud.
+Strata is a project by [Niko1221](https://github.com/Niko1221/Strata) (MIT). This repo only packages
+it for SaladCloud.

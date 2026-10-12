@@ -2,5 +2,6 @@
 .strata
 .github
 README.md
+README.fr.md
 .gitignore
 .dockerignore

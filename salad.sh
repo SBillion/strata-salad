@@ -53,21 +53,14 @@
 #   SALAD_CUDA_ARCH      (opt)     Arch CUDA, défaut 86 (RTX 3090)
 #   SALAD_BUILD_VISION   (opt)     1|0, défaut 1
 #   SALAD_ALLOW_QEMU     (opt)     1 pour autoriser un build amd64 sous QEMU (Mac)
-#   SALAD_BAKE           (opt)     1 = télécharger le modèle AU BUILD (image bakée)
-#   SALAD_KEEP_GGUF      (opt)     1 (défaut) | 0 = supprimer les GGUF bruts de
-#                                  l'image bakée (~-68 Go ; LOW_RAM=on requis)
 #   SALAD_HF_ENDPOINT    (opt)     miroir HuggingFace (ex: https://hf-mirror.com)
 #   SALAD_STRATA_SOURCE  (opt)     huggingface | modelscope
 #   SALAD_CONVERSATION_CACHE_MIB (opt) cache de conversation multi-tours (ex: 8192)
-#   B' (bake) : SALAD_TARGET_IMAGE (image à produire, sinon <base>:<MODEL>-baked),
-#               SALAD_REGISTRY_HOST (ghcr.io), SALAD_REGISTRY_USER, SALAD_REGISTRY_PASS,
-#               SALAD_BAKE_GROUP (strata-bake), SALAD_BAKE_CPU (16),
-#               SALAD_BAKE_MEMORY_MB (61440), SALAD_BAKE_STORAGE_GB (250)
 #   SALAD_RUNTIME_BUILD  (opt)     1 = installer/builder Strata AU DÉMARRAGE du
 #                                  container (image générique, aucun registry)
 #   SALAD_RUNTIME_IMAGE  (opt)     Image de base pour le runtime build
 #                                  (défaut nvidia/cuda:13.0.0-devel-ubuntu24.04)
-#   SALAD_DATA_DIR       (opt)     Chemin data Strata dans le container (vide = auto)
+#   SALAD_DATA_DIR       (opt)     Chemin data Strata dans le container (vide = /data)
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -142,32 +135,13 @@ BUILD_PLATFORM="${SALAD_BUILD_PLATFORM:-linux/amd64}"
 CUDA_ARCH="${SALAD_CUDA_ARCH:-86}"
 BUILD_VISION="${SALAD_BUILD_VISION:-1}"
 
-# Modèle baké dans l'image (download au build) : évite les ~70 Go à chaque
-# nouvelle instance Salad. 1 = activé, 0 = download au démarrage (défaut).
-BAKE="${SALAD_BAKE:-0}"
-BAKED_DOCKERFILE="$REPO_DIR/Dockerfile.baked"
-# Image bakée : garder les GGUF bruts (1) ou les supprimer (0, ~-68 Go) quand
-# LOW_RAM=on lit les experts depuis le pack (expérimental).
-KEEP_GGUF="${SALAD_KEEP_GGUF:-1}"
-
-# B' : bake des données préparées dans une image, depuis un container GPU Salad,
-# via crane (pas de daemon Docker). Voir salad-bake-init.sh.
-BAKE_GROUP="${SALAD_BAKE_GROUP:-strata-bake}"
-TARGET_IMAGE="${SALAD_TARGET_IMAGE:-}"
-REGISTRY_HOST="${SALAD_REGISTRY_HOST:-ghcr.io}"
-REGISTRY_USER="${SALAD_REGISTRY_USER:-}"
-REGISTRY_PASS="${SALAD_REGISTRY_PASS:-}"
-BAKE_CPU="${SALAD_BAKE_CPU:-16}"
-BAKE_MEMORY_MB="${SALAD_BAKE_MEMORY_MB:-61440}"
-BAKE_STORAGE_GB="${SALAD_BAKE_STORAGE_GB:-250}"
-
 # Installation + build de Strata AU DÉMARRAGE du container, depuis une image
 # générique (aucun registry à alimenter). 1 = activé.
 # Coût : tout est refait à chaque instance (disque Salad éphémère).
 RUNTIME_BUILD="${SALAD_RUNTIME_BUILD:-0}"
 
 # Chemin des données Strata DANS le container. Vide = on laisse l'image décider
-# (/data pour l'image standard, /opt/strata-data pour l'image bakée).
+# (/data).
 DATA_DIR="${SALAD_DATA_DIR:-}"
 
 if [ "$RUNTIME_BUILD" = "1" ]; then
@@ -177,7 +151,6 @@ if [ "$RUNTIME_BUILD" = "1" ]; then
 else
   INIT_SCRIPT="$REPO_DIR/salad-container-init.sh"
 fi
-BAKE_INIT="$REPO_DIR/salad-bake-init.sh"
 LAST_GROUP_FILE="${SALAD_LAST_GROUP_FILE:-$HOME/.salad-strata-group}"
 
 # ===========================================================================
@@ -463,67 +436,6 @@ build_patch_body() {
      | if $liveness == 0 then .liveness_probe = null else . end'
 }
 
-# ---------------------------------------------------------------------------
-# B' : body du container group de bake (GPU, crane, pas de networking).
-# ---------------------------------------------------------------------------
-build_bake_body() {
-  [ -f "$BAKE_INIT" ] || err "Fichier de bake introuvable : $BAKE_INIT"
-  [ -n "$IMAGE" ] || err "SALAD_IMAGE (image engine de base) est requis"
-  [ -n "$TARGET_IMAGE" ] || err "SALAD_TARGET_IMAGE est requis (image bakée à produire)"
-  [ -n "$REGISTRY_USER" ] || err "SALAD_REGISTRY_USER est requis"
-  [ -n "$REGISTRY_PASS" ] || err "SALAD_REGISTRY_PASS est requis"
-
-  # Même config que le déploiement qui fonctionne (build_body) :
-  # networking protégé (auth:true), shm, restart_policy, readiness probe.
-  # On ne change que la command + l'env, et on retire startup/liveness
-  # (le bake ne sert pas /health : sinon il serait tué à 60 min).
-  local script env body
-  script=$(cat "$BAKE_INIT")
-  env=$(jq -cn \
-    --arg base "$IMAGE" \
-    --arg target "$TARGET_IMAGE" \
-    --arg rhost "$REGISTRY_HOST" \
-    --arg ruser "$REGISTRY_USER" \
-    --arg rpass "$REGISTRY_PASS" \
-    --arg family "$STRATA_FAMILY" \
-    --arg model "$STRATA_MODEL" \
-    --arg context "$STRATA_CONTEXT" \
-    --arg vision "$STRATA_VISION" \
-    --arg low_ram "$STRATA_LOW_RAM" \
-    --arg kv "$STRATA_KV" \
-    '{
-      BASE_IMAGE: $base,
-      TARGET_IMAGE: $target,
-      REGISTRY_HOST: $rhost,
-      REGISTRY_USER: $ruser,
-      REGISTRY_PASS: $rpass,
-      STRATA_DATA: "/opt/strata-data",
-      FAMILY: $family,
-      MODEL: $model,
-      CONTEXT: $context,
-      VISION: $vision,
-      LOW_RAM: $low_ram
-    } + (if $kv != "" then {KV: $kv} else {} end)')
-
-  body=$(build_body)
-
-  jq -c \
-    --arg name "$BAKE_GROUP" \
-    --arg script "$script" \
-    --argjson env "$env" \
-    --argjson cpu "$BAKE_CPU" \
-    --argjson mem "$BAKE_MEMORY_MB" \
-    --argjson storage "$((BAKE_STORAGE_GB * 1073741824))" \
-    'del(.startup_probe, .liveness_probe)
-     | .name = $name
-     | .display_name = "Strata bake B-prime"
-     | .container.resources.cpu = $cpu
-     | .container.resources.memory = $mem
-     | .container.resources.storage_amount = $storage
-     | .container.command = ["/bin/sh", "-c", $script]
-     | .container.environment_variables = $env' <<<"$body"
-}
-
 # ===========================================================================
 # build / push
 # ===========================================================================
@@ -552,34 +464,15 @@ cmd_build() {
     git clone --depth 1 "$STRATA_REPO" "$SOURCE_DIR"
   fi
 
-  info "1/2 build de l'image moteur ($BUILD_PLATFORM, CUDA_ARCHITECTURES=$CUDA_ARCH)"
-  local base_tag="${IMAGE}-base"
+  info "Build de l'image moteur ($BUILD_PLATFORM, CUDA_ARCHITECTURES=$CUDA_ARCH)"
   docker build --platform "$BUILD_PLATFORM" \
-    -t "$base_tag" \
+    -t "$IMAGE" \
     --build-arg "CUDA_ARCHITECTURES=$CUDA_ARCH" \
     --build-arg "BUILD_VISION=$BUILD_VISION" \
     -f "$SOURCE_DIR/Dockerfile" "$SOURCE_DIR"
 
-  if [ "$BAKE" = "1" ]; then
-    [ -f "$BAKED_DOCKERFILE" ] || err "Dockerfile.baked introuvable : $BAKED_DOCKERFILE"
-    info "2/2 bake du modèle $STRATA_MODEL dans l'image (download ~40-70 Go)"
-    docker build --platform "$BUILD_PLATFORM" \
-      -t "$IMAGE" \
-      --build-arg "BASE_IMAGE=$base_tag" \
-      --build-arg "STRATA_FAMILY=$STRATA_FAMILY" \
-      --build-arg "STRATA_MODEL=$STRATA_MODEL" \
-      --build-arg "STRATA_CONTEXT=$STRATA_CONTEXT" \
-      --build-arg "STRATA_VISION=$STRATA_VISION" \
-      --build-arg "STRATA_LOW_RAM=$STRATA_LOW_RAM" \
-      --build-arg "STRATA_KV=$STRATA_KV" \
-      --build-arg "STRATA_KEEP_GGUF=$KEEP_GGUF" \
-      -f "$BAKED_DOCKERFILE" "$REPO_DIR"
-  else
-    info "2/2 mode sans bake : le modèle sera téléchargé au démarrage du container"
-    docker tag "$base_tag" "$IMAGE"
-  fi
-
   info "Image construite : $IMAGE"
+  info "Le modèle (~40-70 Go) sera téléchargé au démarrage du container."
   info "Pousser avec : salad.sh push"
 }
 
@@ -746,43 +639,6 @@ cmd_update() {
 }
 
 # ===========================================================================
-# bake (B') : préparer sur un container GPU Salad + pousser via crane
-# ===========================================================================
-cmd_bake() {
-  require_org_project
-  [ -n "$IMAGE" ] || err "SALAD_IMAGE (image engine de base, non bakée) est requis"
-  [ -f "$BAKE_INIT" ] || err "Fichier de bake introuvable : $BAKE_INIT"
-
-  if [ -z "$TARGET_IMAGE" ]; then
-    TARGET_IMAGE="${IMAGE%%:*}:${STRATA_MODEL}-baked"
-  fi
-
-  resolve_gpu_class_id
-
-  info "Bake B' : $IMAGE -> $TARGET_IMAGE (registry $REGISTRY_HOST)"
-  info "group=$BAKE_GROUP  cpu=$BAKE_CPU ram=${BAKE_MEMORY_MB}Mo storage=${BAKE_STORAGE_GB}Go  modèle=$STRATA_MODEL"
-
-  local path="/organizations/$ORG/projects/$PROJECT/containers"
-  local body
-  if group_exists "$BAKE_GROUP"; then
-    info "Container group \"$BAKE_GROUP\" existe -> PATCH"
-    body=$(build_bake_body | jq -c 'del(.name, .autostart_policy, .restart_policy)')
-    api_call PATCH "$path/$BAKE_GROUP" "$body" || err "Mise à jour échouée (${API_LAST_STATUS}) : $(api_detail)"
-  else
-    info "Création du container group de bake \"$BAKE_GROUP\""
-    body=$(build_bake_body)
-    api_call POST "$path" "$body" || err "Création échouée (${API_LAST_STATUS}) : $(api_detail)"
-  fi
-  save_last_group "$BAKE_GROUP"
-
-  echo ""
-  info "Suivi :  ./salad.sh logs $BAKE_GROUP"
-  info "Nettoyage après succès :  ./salad.sh delete $BAKE_GROUP"
-  info "Déploiement de l'image bakée :  SALAD_IMAGE=$TARGET_IMAGE SALAD_DATA_DIR=/opt/strata-data ./salad.sh deploy"
-  cmd_status "$BAKE_GROUP"
-}
-
-# ===========================================================================
 # start / stop / status / logs / delete
 # ===========================================================================
 cmd_start() {
@@ -911,7 +767,7 @@ cmd_recreate() {
   if ! api_call POST "$path/instances/$iid/recreate"; then
     err "Recreate échoué (${API_LAST_STATUS}) : $(api_detail)"
   fi
-  info "Recreate demandé — la nouvelle version démarre (re-pull l'image si bakée)."
+  info "Recreate demandé — la nouvelle version démarre (image en cache sur le nœud)."
 }
 
 cmd_delete() {
@@ -942,7 +798,6 @@ Commandes:
   gpu-classes           Lister les classes GPU (trouver l'UUID RTX 3090)
   deploy [NAME]         Créer (ou MAJ) + démarrer le container group
   update [NAME]         Mettre à jour le container group existant (PATCH)
-  bake                  B' : préparer sur un container GPU Salad + push crane
   list                  Lister tous les container groups (nom, état, URL)
   start  [NAME]         Démarrer
   stop   [NAME]         Arrêter
@@ -956,10 +811,9 @@ Commandes:
 
 Env requises : SALAD_API_KEY, SALAD_ORG, SALAD_PROJECT, SALAD_IMAGE
 Modèle       : STRATA_MODEL=${STRATA_MODEL}  STRATA_CONTEXT=${STRATA_CONTEXT}  STRATA_FAMILY=${STRATA_FAMILY}
-GPU          : SALAD_GPU_CLASS="${SALAD_GPU_CLASS}"  SALAD_CPU=${CPU}  SALAD_MEMORY_MB=${MEMORY_MB}
+GPU          : SALAD_GPU_CLASS="${GPU_CLASS_NAME}"  SALAD_CPU=${CPU}  SALAD_MEMORY_MB=${MEMORY_MB}
 
 Modes:
-  SALAD_BAKE=1          modèle baké dans l'image (build)
   SALAD_RUNTIME_BUILD=1 installer/builder Strata au démarrage (image générique, sans registry)
 EOF
 }
@@ -976,7 +830,6 @@ case "$1" in
   gpu-classes) shift; cmd_gpu_classes "$@" ;;
   deploy)      shift; cmd_deploy "$@" ;;
   update)      shift; cmd_update "$@" ;;
-  bake)        shift; cmd_bake "$@" ;;
   start)       shift; cmd_start "$@" ;;
   stop)        shift; cmd_stop "$@" ;;
   restart)     shift; cmd_restart "$@" ;;
